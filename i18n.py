@@ -182,9 +182,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "pt": "· plano **{tier}**",
     },
     "dev_header": {
-        "es": "🛠 **Modo dev** — `{tool}` listo para copiar:",
-        "en": "🛠 **Dev mode** — copy-ready `{tool}`:",
-        "pt": "🛠 **Modo dev** — `{tool}` pronto para copiar:",
+        # Sin backticks alrededor de {tool}: si no, rompen el bloque ``` del comando
+        "es": "🛠 **Modo dev** — {tool} listo para copiar:",
+        "en": "🛠 **Dev mode** — copy-ready {tool}:",
+        "pt": "🛠 **Modo dev** — {tool} pronto para copiar:",
     },
     "dev_on_wget": {
         "es": "🛠 **Modo dev: wget**\nTras cada subida te mando un `wget` copiable.",

@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 
 import aiohttp
-from pyrogram import Client, filters, idle
+from pyrogram import Client, enums, filters, idle
 from pyrogram.errors import MessageNotModified
 from pyrogram.types import (
     BotCommand,
@@ -27,10 +27,16 @@ from pyrogram.types import (
     InlineKeyboardMarkup,
     LinkPreviewOptions,
     Message,
+    MessageEntity,
 )
 
 # kurigram depreca disable_web_page_preview
 _NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
+
+
+def _utf16_len(s: str) -> int:
+    """Longitud en unidades UTF-16 (offsets de entidades de Telegram)."""
+    return len(s.encode("utf-16-le")) // 2
 
 import dripfiles as dripfiles_mod
 from config import load_config
@@ -698,11 +704,26 @@ async def show_success(
     if user.dev_mode:
         tool = user.dev_tool if user.dev_tool in ("wget", "curl") else "wget"
         cmd = dripfiles_mod.download_command(tool, url, filename)
-        # Bloque pre sin language tag: evita que el cliente pinte "bash"
-        # y reduce rarezas de render del flag -O
+        # Entidad PRE (no markdown ```): evita línea vacía + etiqueta "shell"
+        # que mete el cliente al parsear fences.
         header = t(lang, "dev_header", tool=tool)
+        # texto plano: quitar markdown residual del header
+        header_plain = (
+            header.replace("**", "").replace("`", "").replace("__", "").strip()
+        )
+        body = f"{header_plain}\n{cmd}"
+        pre_offset = _utf16_len(header_plain) + 1  # +1 por el \n
+        pre_length = _utf16_len(cmd)
         await progress.reply_text(
-            f"{header}\n\n```\n{cmd}\n```",
+            body,
+            entities=[
+                MessageEntity(
+                    type=enums.MessageEntityType.PRE,
+                    offset=pre_offset,
+                    length=pre_length,
+                    language="",  # vacío = sin badge "shell" ni intro fantasma
+                )
+            ],
             link_preview_options=_NO_PREVIEW,
         )
 

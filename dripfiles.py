@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import uuid
 from dataclasses import dataclass
 from typing import Callable
@@ -490,21 +491,29 @@ def format_expire_note(seconds: int | None, expires_at: int | float | None = Non
     return "⏱ Caduca según el plan de DripFiles."
 
 
-def _sh_single(s: str) -> str:
-    """Comillas simples estilo shell (seguro para copiar/pegar)."""
-    return "'" + (s or "").replace("'", "'\\''") + "'"
+def shell_safe_filename(filename: str | None) -> str:
+    """Nombre apto para shell: sin espacios ni saltos (evita intros al copiar en TG)."""
+    name = (filename or "file").replace("\\", "/").split("/")[-1]
+    name = name.replace("\n", " ").replace("\r", " ").strip() or "file"
+    name = re.sub(r"[^\w.\-]+", "_", name, flags=re.UNICODE)
+    name = re.sub(r"_+", "_", name).strip("._") or "file"
+    return name[:180]
 
 
 def download_command(tool: str, url: str, filename: str) -> str:
-    """Comando listo para copiar: wget o curl (sin ambigüedad -O vs -0)."""
-    f = _sh_single(filename or "file")
-    u = _sh_single(url or "")
+    """Una sola línea lista para copiar (wget o curl).
+
+    Sin espacios en el nombre → Telegram no parte el string a mitad del
+    nombre con un intro al copiar desde el móvil.
+    """
+    name = shell_safe_filename(filename)
+    url = (url or "").strip().replace("\n", "").replace("\r", "")
     tool = (tool or "wget").lower().strip()
     if tool == "curl":
-        # -L sigue redirects; -o escribe al nombre dado
-        return f"curl -L -o {f} {u}"
-    # forma larga: en algunas fuentes -O se confunde con -0
-    return f"wget --output-document={f} {u}"
+        cmd = f"curl -L -o {name} {url}"
+    else:
+        cmd = f"wget -O {name} {url}"
+    return " ".join(cmd.split())
 
 
 def wget_command(url: str, filename: str) -> str:
