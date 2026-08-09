@@ -1,0 +1,28 @@
+# secrets & local config
+.env
+.env.*
+!.env.example
+
+# runtime data
+downloads/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+pending_jobs.json
+
+# telegram session
+*.session
+*.session-journal
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# os / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
