@@ -241,9 +241,9 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
     },
     "expire_default": {
-        "es": "_(plan por defecto)_",
-        "en": "_(plan default)_",
-        "pt": "_(padrão do plano)_",
+        "es": "(plan por defecto)",
+        "en": "(plan default)",
+        "pt": "(padrão do plano)",
     },
     "expire_days": {
         "es": "**{n}** día(s)",
@@ -291,9 +291,9 @@ STRINGS: dict[str, dict[str, str]] = {
         "pt": "· ⚠️ Não consegui ler limites: {err}\n",
     },
     "no_api_key": {
-        "es": "_(sin API key → plan free)_",
-        "en": "_(no API key → free plan)_",
-        "pt": "_(sem API key → plano free)_",
+        "es": "(sin API key → plan free)",
+        "en": "(no API key → free plan)",
+        "pt": "(sem API key → plano free)",
     },
     "downloading": {
         "es": "⬇️ Descargando · `{filename}`",
@@ -556,7 +556,7 @@ STRINGS: dict[str, dict[str, str]] = {
             "· Caducidad plan: **{expire_days:.0f}** día(s)\n"
             "· Key: {key}\n\n"
             "Opcional: `/expire 7` para pedir 7 días en cada subida.\n"
-            "_(Se intentó borrar el mensaje con la key en claro.)_"
+            "(Se intentó borrar el mensaje con la key en claro.)"
         ),
         "en": (
             "✅ **API key saved**\n\n"
@@ -565,7 +565,7 @@ STRINGS: dict[str, dict[str, str]] = {
             "· Plan expiry: **{expire_days:.0f}** day(s)\n"
             "· Key: {key}\n\n"
             "Optional: `/expire 7` to request 7-day links.\n"
-            "_(Tried to delete the message containing the plain key.)_"
+            "(Tried to delete the message containing the plain key.)"
         ),
         "pt": (
             "✅ **API key salva**\n\n"
@@ -574,7 +574,7 @@ STRINGS: dict[str, dict[str, str]] = {
             "· Validade do plano: **{expire_days:.0f}** dia(s)\n"
             "· Key: {key}\n\n"
             "Opcional: `/expire 7` para pedir 7 dias em cada envio.\n"
-            "_(Tentei apagar a mensagem com a key em texto.)_"
+            "(Tentei apagar a mensagem com a key em texto.)"
         ),
     },
     "apikey_bad": {
@@ -736,10 +736,15 @@ def normalize_lang(lang: str | None) -> str:
     return DEFAULT_LANG
 
 
-def t(lang: str | None, key: str, **kwargs: Any) -> str:
+def t(lang: str | None, msg_id: str, **kwargs: Any) -> str:
+    """Traduce `msg_id`. No uses kwargs llamados `lang` (primer arg).
+
+    El segundo parámetro se llama `msg_id` (no `key`) para poder pasar
+    `key=...` en plantillas como la de `/me` y `/apikey`.
+    """
     lang = normalize_lang(lang)
-    block = STRINGS.get(key) or {}
-    text = block.get(lang) or block.get(DEFAULT_LANG) or key
+    block = STRINGS.get(msg_id) or {}
+    text = block.get(lang) or block.get(DEFAULT_LANG) or msg_id
     if kwargs:
         try:
             return text.format(**kwargs)

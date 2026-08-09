@@ -25,8 +25,12 @@ from pyrogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    LinkPreviewOptions,
     Message,
 )
+
+# kurigram depreca disable_web_page_preview
+_NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 import dripfiles as dripfiles_mod
 from config import load_config
@@ -688,7 +692,7 @@ async def show_success(
     await safe_edit(
         progress,
         text,
-        disable_web_page_preview=True,
+        link_preview_options=_NO_PREVIEW,
         reply_markup=success_keyboard(lang, url, token),
     )
     if user.dev_mode:
@@ -699,7 +703,7 @@ async def show_success(
         header = t(lang, "dev_header", tool=tool)
         await progress.reply_text(
             f"{header}\n\n```\n{cmd}\n```",
-            disable_web_page_preview=True,
+            link_preview_options=_NO_PREVIEW,
         )
 
 
@@ -754,7 +758,7 @@ async def cmd_help(_: Client, message: Message):
     lang = normalize_lang(user.lang)
     await message.reply_text(
         help_text(lang),
-        disable_web_page_preview=True,
+        link_preview_options=_NO_PREVIEW,
         reply_markup=help_keyboard(lang),
     )
 
@@ -773,7 +777,7 @@ async def cmd_settings(_: Client, message: Message):
         return
     await message.reply_text(
         await settings_text(message.from_user.id),
-        disable_web_page_preview=True,
+        link_preview_options=_NO_PREVIEW,
     )
 
 
@@ -824,7 +828,7 @@ async def cmd_apikey(_: Client, message: Message):
     if not arg:
         await message.reply_text(
             t(lang, "apikey_help", key=mask_key(user.api_key, lang)),
-            disable_web_page_preview=True,
+            link_preview_options=_NO_PREVIEW,
         )
         return
 
@@ -978,7 +982,7 @@ async def lang_callback(_: Client, query: CallbackQuery):
         pass
     await query.message.reply_text(
         help_text(code),
-        disable_web_page_preview=True,
+        link_preview_options=_NO_PREVIEW,
         reply_markup=help_keyboard(code),
     )
 
@@ -1000,7 +1004,7 @@ async def ui_callback(_: Client, query: CallbackQuery):
 
     if action == "settings":
         await query.message.reply_text(
-            await settings_text(user_id), disable_web_page_preview=True
+            await settings_text(user_id), link_preview_options=_NO_PREVIEW
         )
     elif action == "dev":
         state = (
