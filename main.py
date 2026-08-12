@@ -71,6 +71,8 @@ database: Database
 background_tasks: set[asyncio.Task] = set()
 zip_sessions: dict[int, "ZipSession"] = {}
 pending_first_file: dict[int, Message] = {}
+_lang_prompted: set[int] = set()
+_STALE_SECONDS = 180
 _KNOWN_CMDS = frozenset(
     {
         "start",
@@ -921,6 +923,24 @@ def _pending_filename(message: Message) -> str:
     return safe_filename(raw)
 
 
+def message_is_stale(message: Message, max_age: float = _STALE_SECONDS) -> bool:
+    dt = getattr(message, "date", None)
+    if dt is None:
+        return False
+    ts = dt.timestamp() if hasattr(dt, "timestamp") else float(dt)
+    return (time.time() - ts) > max_age
+
+
+def infer_lang(from_user) -> str | None:
+    raw = (getattr(from_user, "language_code", None) or "").lower().replace("_", "-")
+    if not raw:
+        return None
+    primary = raw.split("-", 1)[0]
+    if primary in LANGS:
+        return primary
+    return None
+
+
 async def prompt_lang(
     message: Message, *, pending_name: str | None = None
 ) -> None:
@@ -932,35 +952,39 @@ async def prompt_lang(
     )
 
 
-def stash_pending_media(message: Message) -> bool:
-    """Guarda el archivo para subirlo al elegir idioma. True si ya había uno."""
-    if not message.from_user or not media_file_id(message):
-        return False
+def stash_pending_media(message: Message) -> None:
+    if message.from_user and media_file_id(message):
+        pending_first_file[message.from_user.id] = message
+
+
+async def ensure_lang(
+    message: Message, *, force_prompt: bool = False
+) -> UserSettings | None:
+    """Idioma guardado, o el de Telegram. El picker solo una vez (nunca en backlog)."""
+    if not message.from_user:
+        return None
     uid = message.from_user.id
-    replaced = uid in pending_first_file
-    pending_first_file[uid] = message
-    return replaced
-
-
-async def ensure_lang(message: Message) -> UserSettings | None:
-    """Si no hay idioma, pide elegir y devuelve None. No tira el archivo."""
-    user = await database.get_user(message.from_user.id)
+    user = await database.get_user(uid)
     if user.lang:
         return user
-    pending_name = None
+
+    inferred = infer_lang(message.from_user)
+    if inferred:
+        return await database.upsert_user(uid, lang=inferred)
+
     if media_file_id(message):
-        replaced = stash_pending_media(message)
+        stash_pending_media(message)
         pending_name = _pending_filename(message)
-        if replaced:
-            await message.reply_text(
-                t(DEFAULT_LANG, "pending_replaced", filename=pending_name)
-            )
-            return None
     else:
-        pending = pending_first_file.get(message.from_user.id)
-        if pending:
-            pending_name = _pending_filename(pending)
-    await prompt_lang(message, pending_name=pending_name)
+        pending = pending_first_file.get(uid)
+        pending_name = _pending_filename(pending) if pending else None
+
+    if message_is_stale(message) and not force_prompt:
+        return None
+
+    if force_prompt or uid not in _lang_prompted:
+        _lang_prompted.add(uid)
+        await prompt_lang(message, pending_name=pending_name)
     return None
 
 
@@ -969,6 +993,8 @@ async def ensure_lang(message: Message) -> UserSettings | None:
 
 @app.on_message(filters.command(["start", "help"]) & filters.private & auth)
 async def cmd_help(_: Client, message: Message):
+    if message_is_stale(message):
+        return
     user = await ensure_lang(message)
     if not user:
         return
@@ -982,6 +1008,8 @@ async def cmd_help(_: Client, message: Message):
 
 @app.on_message(filters.command("lang") & filters.private & auth)
 async def cmd_lang(_: Client, message: Message):
+    if message_is_stale(message):
+        return
     await message.reply_text(
         t(await lang_of(message.from_user.id), "choose_lang"),
         reply_markup=lang_keyboard(),
@@ -990,6 +1018,8 @@ async def cmd_lang(_: Client, message: Message):
 
 @app.on_message(filters.command("settings") & filters.private & auth)
 async def cmd_settings(_: Client, message: Message):
+    if message_is_stale(message):
+        return
     if not await ensure_lang(message):
         return
     await message.reply_text(
@@ -1031,6 +1061,8 @@ async def send_me_card(origin: Message, user: UserSettings) -> None:
 
 @app.on_message(filters.command("me") & filters.private & auth)
 async def cmd_me(_: Client, message: Message):
+    if message_is_stale(message):
+        return
     user = await ensure_lang(message)
     if not user:
         return
@@ -1039,6 +1071,8 @@ async def cmd_me(_: Client, message: Message):
 
 @app.on_message(filters.command("apikey") & filters.private & auth)
 async def cmd_apikey(_: Client, message: Message):
+    if message_is_stale(message):
+        return
     user = await ensure_lang(message)
     if not user:
         return
@@ -1099,6 +1133,8 @@ async def cmd_apikey(_: Client, message: Message):
 
 @app.on_message(filters.command("expire") & filters.private & auth)
 async def cmd_expire(_: Client, message: Message):
+    if message_is_stale(message):
+        return
     user = await ensure_lang(message)
     if not user:
         return
@@ -1142,6 +1178,8 @@ async def cmd_expire(_: Client, message: Message):
 
 @app.on_message(filters.command("dev") & filters.private & auth)
 async def cmd_dev(_: Client, message: Message):
+    if message_is_stale(message):
+        return
     user = await ensure_lang(message)
     if not user:
         return
@@ -1173,6 +1211,8 @@ async def cmd_dev(_: Client, message: Message):
 
 @app.on_message(filters.command("zip") & filters.private & auth)
 async def cmd_zip(_: Client, message: Message):
+    if message_is_stale(message):
+        return
     if not await ensure_lang(message):
         return
     await start_zip_session(message)
@@ -1180,6 +1220,8 @@ async def cmd_zip(_: Client, message: Message):
 
 @app.on_message(filters.command("cancel") & filters.private & auth)
 async def cmd_cancel(_: Client, message: Message):
+    if message_is_stale(message):
+        return
     user = await ensure_lang(message)
     if not user:
         return
@@ -1194,6 +1236,8 @@ async def cmd_cancel(_: Client, message: Message):
 
 @app.on_message(filters.command("done") & filters.private & auth)
 async def cmd_done(_: Client, message: Message):
+    if message_is_stale(message):
+        return
     user = await ensure_lang(message)
     if not user:
         return
@@ -1219,6 +1263,7 @@ async def lang_callback(_: Client, query: CallbackQuery):
     code = query.data.split(":", 1)[1]
     user_id = query.from_user.id
     await database.upsert_user(user_id, lang=code)
+    _lang_prompted.discard(user_id)
     await query.answer()
     try:
         await query.message.edit_text(t(code, "lang_set"))
@@ -1382,7 +1427,8 @@ async def handle_media(_: Client, message: Message):
     if session:
         if session.expired():
             await clear_zip_session(user_id)
-            await message.reply_text(t(lang, "zip_expired"))
+            if not message_is_stale(message):
+                await message.reply_text(t(lang, "zip_expired"))
             return
         spawn(stage_for_zip(message, session))
         return
@@ -1392,6 +1438,8 @@ async def handle_media(_: Client, message: Message):
 
 @app.on_message(filters.private & auth & filters.text, group=8)
 async def fallback_text(_: Client, message: Message):
+    if message_is_stale(message):
+        return
     text = (message.text or "").strip()
     if not text:
         return
