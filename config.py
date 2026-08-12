@@ -15,6 +15,12 @@ class Config:
     allowed_users: frozenset[int]
     download_dir: str
     database_path: str
+    # API key de DripFiles del bot: se usa en todas las subidas por defecto.
+    # Vacío = plan free (salvo key propia del usuario si está permitido).
+    dripfiles_api_key: str | None
+    # Si True, los usuarios pueden guardar su propia key con /apikey.
+    # Si False, siempre se usa la del bot (o free si no hay DRIPFILES_API_KEY).
+    allow_user_api_keys: bool
     # plantilla del mensaje/descripción en DripFiles
     # placeholders: {filename} {size} {count}
     dripfiles_message: str
@@ -25,6 +31,13 @@ class Config:
 def _env(name: str) -> str | None:
     value = os.getenv(name, "").strip()
     return value or None
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = _env(name)
+    if raw is None:
+        return default
+    return raw.lower() in ("1", "true", "yes", "on", "y", "si", "sí")
 
 
 def load_config() -> Config:
@@ -57,6 +70,10 @@ def load_config() -> Config:
         allowed_users=allowed,
         download_dir=download_dir,
         database_path=db_path,
+        dripfiles_api_key=_env("DRIPFILES_API_KEY"),
+        # Por defecto True: cualquiera puede poner /apikey. Pon false para
+        # forzar siempre la key del bot (o free).
+        allow_user_api_keys=_env_bool("ALLOW_USER_API_KEYS", True),
         # Solo el nombre: el tamaño ya se ve en la página de DripFiles
         dripfiles_message=_env("DRIPFILES_MESSAGE") or "{filename}",
         zip_timeout_minutes=timeout,

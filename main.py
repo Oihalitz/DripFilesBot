@@ -1,4 +1,4 @@
-"""DripFilesBot — archivo → enlace DripFiles (free o API key del usuario).
+"""DripFilesBot — archivo → enlace DripFiles (key del bot o del usuario).
 
 ZIP · botones · resubir · /apikey · /expire · /dev (wget|curl) · i18n · SQLite
 """
@@ -160,6 +160,33 @@ def mask_key(key: str | None, lang: str) -> str:
     return f"`{k[:4]}…{k[-4:]}`"
 
 
+def user_own_api_key(user: UserSettings) -> str | None:
+    """Key propia del usuario solo si el host lo permite."""
+    if not cfg.allow_user_api_keys:
+        return None
+    if not user.api_key:
+        return None
+    return user.api_key.strip() or None
+
+
+def effective_api_key(user: UserSettings) -> str | None:
+    """Key efectiva: propia (si se permite) → key del bot → free (None)."""
+    own = user_own_api_key(user)
+    if own:
+        return own
+    bot_key = cfg.dripfiles_api_key
+    return bot_key.strip() if bot_key else None
+
+
+def display_api_key(user: UserSettings, lang: str) -> str:
+    """Texto de la key en /settings y /apikey (sin revelar la del bot en claro)."""
+    if user_own_api_key(user):
+        return mask_key(user.api_key, lang)
+    if cfg.dripfiles_api_key:
+        return t(lang, "using_bot_key")
+    return t(lang, "no_api_key")
+
+
 def open_note(lang: str) -> str:
     if cfg.allowed_users:
         return t(lang, "open_whitelist", n=len(cfg.allowed_users))
@@ -167,7 +194,19 @@ def open_note(lang: str) -> str:
 
 
 def help_text(lang: str) -> str:
-    return t(lang, "help", open_note=open_note(lang))
+    if cfg.allow_user_api_keys:
+        api_note = t(lang, "help_api_own_ok")
+        apikey_cmd = t(lang, "help_apikey_cmd")
+    else:
+        api_note = t(lang, "help_api_own_off")
+        apikey_cmd = ""
+    return t(
+        lang,
+        "help",
+        open_note=open_note(lang),
+        api_note=api_note,
+        apikey_cmd=apikey_cmd,
+    )
 
 
 def lang_keyboard() -> InlineKeyboardMarkup:
@@ -347,14 +386,15 @@ async def user_limits(
 ) -> tuple[dripfiles_mod.AccountLimits, int | None, str | None]:
     """Devuelve (límites, expire_seconds, aviso_failover).
 
-    Si la API key está mal → failover automático al plan free + aviso.
+    Key efectiva = del usuario o del bot. Si falla → free + aviso.
     """
-    if not user.api_key:
+    api_key = effective_api_key(user)
+    if not api_key:
         limits = await free_limits_capped()
         return limits, None, None
 
     try:
-        limits = await dripfiles_mod.get_account(http, user.api_key)
+        limits = await dripfiles_mod.get_account(http, api_key)
     except dripfiles_mod.DripFilesAuthError:
         free = await free_limits_capped()
         return free, None, "auth"
@@ -388,7 +428,7 @@ async def settings_text(user_id: int) -> str:
     try:
         limits, expire, failover = await user_limits(user)
         want = ""
-        if user.api_key and expire and not failover:
+        if effective_api_key(user) and expire and not failover:
             want = t(lang, "want_expire", days=expire / 86400)
         lim_line = t(
             lang,
@@ -419,7 +459,7 @@ async def settings_text(user_id: int) -> str:
         lang,
         "settings",
         lang_label=LANG_LABELS.get(lang, lang),
-        api_key=mask_key(user.api_key, lang),
+        api_key=display_api_key(user, lang),
         expire=expire_s,
         dev=dev_s,
         limits=lim_line,
@@ -546,11 +586,12 @@ async def upload_to_dripfiles(
 ) -> dict:
     """Sube a DripFiles.
 
-    · Con API key válida → API autenticada.
+    · Key del usuario o del bot → API autenticada.
     · Si la key falla (401/403) y el archivo ≤ free → reintenta free (failover).
     · `prefer_free=True` si /me ya falló por auth (no reintentar la key rota).
     """
     last_edit = [0.0]
+    api_key = effective_api_key(user)
 
     def on_progress(uploaded: int, total: int) -> None:
         now = time.monotonic()
@@ -620,13 +661,13 @@ async def upload_to_dripfiles(
         return result
 
     # Ya sabemos que la key no vale → free directo
-    if prefer_free or not user.api_key:
+    if prefer_free or not api_key:
         return await _upload_free(reason="auth" if prefer_free else None)
 
-    # Intento autenticado
+    # Intento autenticado (key del usuario o del bot)
     try:
         result = await _do(
-            api_key=user.api_key,
+            api_key=api_key,
             expire=expire_seconds,
             max_size=limits.max_size_bytes,
             chunk=limits.chunk_size,
@@ -810,8 +851,14 @@ async def cmd_me(_: Client, message: Message):
     lang = normalize_lang(user.lang)
     status = await message.reply_text(t(lang, "me_loading"))
     try:
-        limits = await dripfiles_mod.resolve_limits(http, user.api_key)
-        mode = t(lang, "me_mode_key") if user.api_key else t(lang, "me_mode_free")
+        api_key = effective_api_key(user)
+        limits = await dripfiles_mod.resolve_limits(http, api_key)
+        if user_own_api_key(user):
+            mode = t(lang, "me_mode_key")
+        elif cfg.dripfiles_api_key:
+            mode = t(lang, "me_mode_bot")
+        else:
+            mode = t(lang, "me_mode_free")
         await safe_edit(
             status,
             t(
@@ -823,7 +870,7 @@ async def cmd_me(_: Client, message: Message):
                 max_files=limits.max_files,
                 expire_days=limits.expire_days,
                 chunk=human_size(limits.chunk_size),
-                key=mask_key(user.api_key, lang),
+                key=display_api_key(user, lang),
             ),
         )
     except dripfiles_mod.DripFilesError as exc:
@@ -840,6 +887,13 @@ async def cmd_apikey(_: Client, message: Message):
     parts = (message.text or "").split(maxsplit=1)
     arg = parts[1].strip() if len(parts) > 1 else ""
 
+    if not cfg.allow_user_api_keys:
+        await message.reply_text(
+            t(lang, "apikey_disabled", key=display_api_key(user, lang)),
+            link_preview_options=_NO_PREVIEW,
+        )
+        return
+
     async def scrub():
         try:
             await message.delete()
@@ -848,7 +902,7 @@ async def cmd_apikey(_: Client, message: Message):
 
     if not arg:
         await message.reply_text(
-            t(lang, "apikey_help", key=mask_key(user.api_key, lang)),
+            t(lang, "apikey_help", key=display_api_key(user, lang)),
             link_preview_options=_NO_PREVIEW,
         )
         return
@@ -856,7 +910,10 @@ async def cmd_apikey(_: Client, message: Message):
     if arg.lower() in ("clear", "del", "delete", "remove", "none", "free"):
         await database.upsert_user(user_id, api_key=None)
         await scrub()
-        await message.reply_text(t(lang, "apikey_cleared"))
+        if cfg.dripfiles_api_key:
+            await message.reply_text(t(lang, "apikey_cleared_bot"))
+        else:
+            await message.reply_text(t(lang, "apikey_cleared"))
         return
 
     key = arg.strip().strip("\"'")
@@ -914,7 +971,9 @@ async def cmd_expire(_: Client, message: Message):
         return
 
     await database.upsert_user(user_id, expire_days=days)
-    note = t(lang, "expire_no_key_note") if not user.api_key else ""
+    note = (
+        t(lang, "expire_no_key_note") if not effective_api_key(user) else ""
+    )
     await message.reply_text(t(lang, "expire_set", days=days, note=note))
 
 
@@ -1627,23 +1686,39 @@ async def main() -> None:
         log.info("Whitelist: %s user(s)", len(cfg.allowed_users))
     else:
         log.info("Public bot (ALLOWED_USER_IDS empty)")
+    if cfg.dripfiles_api_key:
+        log.info(
+            "DripFiles bot key: set (uploads auth by default); "
+            "user keys: %s",
+            "allowed" if cfg.allow_user_api_keys else "disabled",
+        )
+    else:
+        log.info(
+            "DripFiles bot key: none (free unless user /apikey); "
+            "user keys: %s",
+            "allowed" if cfg.allow_user_api_keys else "disabled",
+        )
 
     await app.start()
-    await app.set_bot_commands(
+    commands = [
+        BotCommand("start", "Help / Ayuda"),
+        BotCommand("help", "Help / Ayuda"),
+        BotCommand("lang", "Language / Idioma"),
+        BotCommand("zip", "ZIP mode"),
+        BotCommand("done", "Finish ZIP"),
+        BotCommand("cancel", "Cancel ZIP"),
+    ]
+    if cfg.allow_user_api_keys:
+        commands.append(BotCommand("apikey", "DripFiles API key"))
+    commands.extend(
         [
-            BotCommand("start", "Help / Ayuda"),
-            BotCommand("help", "Help / Ayuda"),
-            BotCommand("lang", "Language / Idioma"),
-            BotCommand("zip", "ZIP mode"),
-            BotCommand("done", "Finish ZIP"),
-            BotCommand("cancel", "Cancel ZIP"),
-            BotCommand("apikey", "DripFiles API key"),
             BotCommand("expire", "Preferred expiry days"),
             BotCommand("dev", "Dev: wget / curl"),
             BotCommand("settings", "Settings"),
             BotCommand("me", "DripFiles account limits"),
         ]
     )
+    await app.set_bot_commands(commands)
     me = await app.get_me()
     log.info("DripFilesBot @%s (db=%s)", me.username, cfg.database_path)
     janitor = asyncio.create_task(zip_janitor())

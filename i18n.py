@@ -29,13 +29,12 @@ STRINGS: dict[str, dict[str, str]] = {
             "💧 **DripFilesBot**\n\n"
             "Mándame un **archivo** y te devuelvo un enlace de "
             "[DripFiles](https://dripfiles.com).\n\n"
-            "**Sin API key** → plan free (~2 GB, ~2 días).\n"
-            "**Con tu API key** → límites de **tu** cuenta.\n"
+            "{api_note}"
             "Telegram Premium: hasta **~4 GB** al bot.\n\n"
             "**Comandos**\n"
             "• `/zip` — acumular y empaquetar\n"
             "• `/done` `[nombre.zip]` · `/cancel`\n"
-            "• `/apikey TU_KEY` · `/apikey clear`\n"
+            "{apikey_cmd}"
             "• `/expire 7` — caducidad preferida (con key)\n"
             "• `/dev` — wget / curl / off (comando copiable)\n"
             "• `/lang` — cambiar idioma\n"
@@ -47,13 +46,12 @@ STRINGS: dict[str, dict[str, str]] = {
             "💧 **DripFilesBot**\n\n"
             "Send me a **file** and I'll give you a "
             "[DripFiles](https://dripfiles.com) link.\n\n"
-            "**No API key** → free plan (~2 GB, ~2 days).\n"
-            "**Your API key** → your account limits.\n"
+            "{api_note}"
             "Telegram Premium: up to **~4 GB** to the bot.\n\n"
             "**Commands**\n"
             "• `/zip` — collect files into a zip\n"
             "• `/done` `[name.zip]` · `/cancel`\n"
-            "• `/apikey YOUR_KEY` · `/apikey clear`\n"
+            "{apikey_cmd}"
             "• `/expire 7` — preferred expiry (with key)\n"
             "• `/dev` — wget / curl / off (copyable command)\n"
             "• `/lang` — change language\n"
@@ -65,19 +63,69 @@ STRINGS: dict[str, dict[str, str]] = {
             "💧 **DripFilesBot**\n\n"
             "Envie um **arquivo** e eu devolvo um link do "
             "[DripFiles](https://dripfiles.com).\n\n"
-            "**Sem API key** → plano free (~2 GB, ~2 dias).\n"
-            "**Com sua API key** → limites da **sua** conta.\n"
+            "{api_note}"
             "Telegram Premium: até **~4 GB** para o bot.\n\n"
             "**Comandos**\n"
             "• `/zip` — juntar arquivos num zip\n"
             "• `/done` `[nome.zip]` · `/cancel`\n"
-            "• `/apikey SUA_KEY` · `/apikey clear`\n"
+            "{apikey_cmd}"
             "• `/expire 7` — validade preferida (com key)\n"
             "• `/dev` — wget / curl / off (comando copiável)\n"
             "• `/lang` — mudar idioma\n"
             "• `/settings` · `/me`\n\n"
             "Após enviar: **💧 Abrir** · **🔄 Reenviar**\n\n"
             "{open_note}"
+        ),
+    },
+    "help_api_own_ok": {
+        "es": (
+            "**Por defecto** → API key del bot (si el host la configuró; "
+            "si no, plan free).\n"
+            "**Con tu API key** (`/apikey`) → límites de **tu** cuenta.\n"
+        ),
+        "en": (
+            "**Default** → bot API key (if the host set one; else free plan).\n"
+            "**Your API key** (`/apikey`) → your account limits.\n"
+        ),
+        "pt": (
+            "**Padrão** → API key do bot (se o host configurou; senão free).\n"
+            "**Com sua API key** (`/apikey`) → limites da **sua** conta.\n"
+        ),
+    },
+    "help_api_own_off": {
+        "es": (
+            "Todas las subidas usan la **cuenta del bot** "
+            "(el host no permite API keys personales).\n"
+        ),
+        "en": (
+            "All uploads use the **bot's account** "
+            "(the host disabled personal API keys).\n"
+        ),
+        "pt": (
+            "Todos os envios usam a **conta do bot** "
+            "(o host desativou API keys pessoais).\n"
+        ),
+    },
+    "help_apikey_cmd": {
+        "es": "• `/apikey TU_KEY` · `/apikey clear`\n",
+        "en": "• `/apikey YOUR_KEY` · `/apikey clear`\n",
+        "pt": "• `/apikey SUA_KEY` · `/apikey clear`\n",
+    },
+    "apikey_disabled": {
+        "es": (
+            "🔒 Este bot **no permite** API keys personales.\n\n"
+            "En uso: {key}\n\n"
+            "El host lo controla con `ALLOW_USER_API_KEYS`."
+        ),
+        "en": (
+            "🔒 This bot **does not allow** personal API keys.\n\n"
+            "In use: {key}\n\n"
+            "The host controls this with `ALLOW_USER_API_KEYS`."
+        ),
+        "pt": (
+            "🔒 Este bot **não permite** API keys pessoais.\n\n"
+            "Em uso: {key}\n\n"
+            "O host controla com `ALLOW_USER_API_KEYS`."
         ),
     },
     "open_public": {
@@ -295,6 +343,11 @@ STRINGS: dict[str, dict[str, str]] = {
         "es": "(sin API key → plan free)",
         "en": "(no API key → free plan)",
         "pt": "(sem API key → plano free)",
+    },
+    "using_bot_key": {
+        "es": "(usando la del bot)",
+        "en": "(using the bot's key)",
+        "pt": "(usando a do bot)",
     },
     "downloading": {
         "es": "⬇️ Descargando · `{filename}`",
@@ -518,31 +571,39 @@ STRINGS: dict[str, dict[str, str]] = {
             "🔑 **API key de DripFiles**\n\n"
             "Actual: {key}\n\n"
             "Uso:\n"
-            "• `/apikey TU_API_KEY` — guardar y validar\n"
-            "• `/apikey clear` — borrar y usar plan free\n\n"
-            "La key se crea en [dripfiles.com](https://dripfiles.com)."
+            "• `/apikey TU_API_KEY` — guardar y validar (tuya)\n"
+            "• `/apikey clear` — borrar la tuya y usar la del bot\n\n"
+            "Sin key propia se usa la del bot. Crea una en "
+            "[dripfiles.com](https://dripfiles.com)."
         ),
         "en": (
             "🔑 **DripFiles API key**\n\n"
             "Current: {key}\n\n"
             "Usage:\n"
-            "• `/apikey YOUR_API_KEY` — save & validate\n"
-            "• `/apikey clear` — remove and use free plan\n\n"
-            "Create a key at [dripfiles.com](https://dripfiles.com)."
+            "• `/apikey YOUR_API_KEY` — save & validate (yours)\n"
+            "• `/apikey clear` — remove yours and use the bot's key\n\n"
+            "Without your own key, the bot's key is used. Create one at "
+            "[dripfiles.com](https://dripfiles.com)."
         ),
         "pt": (
             "🔑 **API key do DripFiles**\n\n"
             "Atual: {key}\n\n"
             "Uso:\n"
-            "• `/apikey SUA_API_KEY` — salvar e validar\n"
-            "• `/apikey clear` — remover e usar plano free\n\n"
-            "Crie a key em [dripfiles.com](https://dripfiles.com)."
+            "• `/apikey SUA_API_KEY` — salvar e validar (sua)\n"
+            "• `/apikey clear` — remover a sua e usar a do bot\n\n"
+            "Sem key própria usa-se a do bot. Crie em "
+            "[dripfiles.com](https://dripfiles.com)."
         ),
     },
     "apikey_cleared": {
         "es": "✅ API key eliminada. Usarás el plan **free** (~2 GB / ~2 días).",
         "en": "✅ API key removed. You'll use the **free** plan (~2 GB / ~2 days).",
         "pt": "✅ API key removida. Você usará o plano **free** (~2 GB / ~2 dias).",
+    },
+    "apikey_cleared_bot": {
+        "es": "✅ Tu API key eliminada. Las subidas usarán la **key del bot**.",
+        "en": "✅ Your API key removed. Uploads will use the **bot's key**.",
+        "pt": "✅ Sua API key removida. Os envios usarão a **key do bot**.",
     },
     "apikey_validating": {
         "es": "🔎 Validando API key…",
@@ -706,9 +767,14 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
     },
     "me_mode_key": {
-        "es": "API key",
-        "en": "API key",
-        "pt": "API key",
+        "es": "tu API key",
+        "en": "your API key",
+        "pt": "sua API key",
+    },
+    "me_mode_bot": {
+        "es": "key del bot",
+        "en": "bot's key",
+        "pt": "key do bot",
     },
     "me_mode_free": {
         "es": "free (sin key)",

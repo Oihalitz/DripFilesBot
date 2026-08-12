@@ -105,14 +105,23 @@ Re-upload jobs store Telegram `file_id`s in SQLite (not the file bytes) so the b
 3. Drop a file (or `/zip` for several).  
 4. Share the link. Optional: `/dev` for a copyable `wget` / `curl` command.
 
-### Free vs your API key
+### Which DripFiles key is used?
+
+Priority:
+
+1. **User’s own key** — only if the host set `ALLOW_USER_API_KEYS=true` (default) and the user ran `/apikey YOUR_KEY`
+2. **Bot key** — `DRIPFILES_API_KEY` (all uploads for everyone else)
+3. **Free plan** — if there is no bot key and no user key
 
 | Mode | Size (typical) | Link lifetime | How |
 |---|---|---|---|
-| **Free** (no key) | ~2 GB | ~2 days (fixed by DripFiles) | Just send a file |
-| **Your API key** | Your plan (bot path up to **~4 GB**) | Plan default or `/expire N` | `/apikey YOUR_KEY` |
+| **Bot API key** (default) | Operator plan (bot path up to **~4 GB**) | Plan default or `/expire N` | Just send a file (`DRIPFILES_API_KEY`) |
+| **Your API key** | Your plan (bot path up to **~4 GB**) | Plan default or `/expire N` | `/apikey YOUR_KEY` (if host allows) |
+| **Free** | ~2 GB | ~2 days (fixed by DripFiles) | No bot key and no personal key |
 
-Create a key in your [DripFiles account](https://dripfiles.com). The bot validates it with `GET /api/v1/me` and stores it **in plain text in SQLite on the bot host**. Self-host if you need full control over key privacy.
+**Host option:** set `ALLOW_USER_API_KEYS=false` so nobody can override your bot key (or free tier). `/apikey` then replies that personal keys are disabled.
+
+Create a personal key in your [DripFiles account](https://dripfiles.com). The bot validates it with `GET /api/v1/me` and stores it **in plain text in SQLite on the bot host**. Self-host if you need full control over key privacy.
 
 ---
 
@@ -125,14 +134,14 @@ Create a key in your [DripFiles account](https://dripfiles.com). The bot validat
 | `/zip` | Start a multi-file session |
 | `/done` `[name.zip]` | Pack staged files and upload |
 | `/cancel` | Abort zip and wipe temp files |
-| `/apikey YOUR_KEY` | Save & validate DripFiles API key |
-| `/apikey clear` | Remove key → free tier |
+| `/apikey YOUR_KEY` | Save & validate your own DripFiles API key |
+| `/apikey clear` | Remove yours → back to the bot's key |
 | `/expire 7` | Preferred link lifetime in days (paid) |
 | `/expire clear` | Use plan default expiry |
 | `/dev` | Buttons: **wget** · **curl** · **OFF** |
 | `/dev wget` · `/dev curl` · `/dev off` | Set directly |
 | `/settings` | Your configuration |
-| `/me` | Live DripFiles limits (free / your key) |
+| `/me` | Live DripFiles limits (bot key / your key / free) |
 
 ### After each successful upload
 
@@ -207,6 +216,8 @@ cp .env.example .env
 | `TELEGRAM_API_ID` | yes | [my.telegram.org/apps](https://my.telegram.org/apps) |
 | `TELEGRAM_API_HASH` | yes | Same as above |
 | `TELEGRAM_BOT_TOKEN` | yes | [@BotFather](https://t.me/BotFather) |
+| `DRIPFILES_API_KEY` | no | Default DripFiles API key for all uploads |
+| `ALLOW_USER_API_KEYS` | no | `true` (default) = users may `/apikey`. `false` = always bot key / free |
 | `ALLOWED_USER_IDS` | no | Empty = **public**. Comma-separated IDs = whitelist |
 | `DOWNLOAD_DIR` | no | Temp workspace (default `downloads`) |
 | `DATABASE_PATH` | no | SQLite path (default `downloads/dripfiles_bot.db`) |

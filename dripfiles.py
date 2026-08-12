@@ -2,14 +2,16 @@
 
 Free (sin key):  https://dripfiles.com/api/v1/free
   · ~2 GB, enlaces ~2 días, rate limit por IP
+  · create devuelve upload_id + upload_token (header X-Upload-Token)
 
-Autenticada (API key del usuario):  https://dripfiles.com/api/v1
+Autenticada (API key del bot o del usuario):  https://dripfiles.com/api/v1
   · límites del plan de la cuenta (tamaño, caducidad, …)
   · Authorization: Bearer <api_key>
+  · create devuelve upload_id (sin upload_token; basta el Bearer)
   · body de create acepta `expire` (segundos) y `message`
 
-Flujo (idéntico en free y auth):
-  1. POST …/uploads              → upload_id + upload_token
+Flujo:
+  1. POST …/uploads              → upload_id [+ upload_token en free]
   2. POST …/uploads/{id}/files   → trozos multipart (files[]) + Content-Range
   3. POST …/uploads/{id}/complete
   4. GET  …/uploads/{id}         → poll hasta status=ready → url
@@ -113,31 +115,57 @@ def _parse_limits(data: dict, *, fallback_free: bool = False) -> AccountLimits:
                 v = data.get(k)
             if isinstance(v, (int, float)) and v > 0:
                 return int(v)
+            # a veces vienen como string numérico
+            if isinstance(v, str) and v.strip().isdigit():
+                n = int(v.strip())
+                if n > 0:
+                    return n
         return default
 
     max_size = _int(
+        "max_file_bytes",
         "max_size_bytes",
         "max_bytes",
         "upload_max_size",
         default=FREE_MAX_SIZE if fallback_free else TELEGRAM_MAX_SIZE,
     )
-    # a veces solo viene en GB
+    # a veces solo viene en MB / GB
     if max_size == (FREE_MAX_SIZE if fallback_free else TELEGRAM_MAX_SIZE):
-        gb = limits.get("max_size_gb") or data.get("max_size_gb")
-        if isinstance(gb, (int, float)) and gb > 0:
-            max_size = int(gb * 1024**3)
+        mb = limits.get("max_size_mb") or data.get("max_size_mb")
+        if isinstance(mb, (int, float)) and mb > 0:
+            max_size = int(mb * 1024**2)
+        else:
+            gb = limits.get("max_size_gb") or data.get("max_size_gb")
+            if isinstance(gb, (int, float)) and gb > 0:
+                max_size = int(gb * 1024**3)
 
     expire = _int(
         "expire_seconds",
         "expire",
         "default_expire",
         "link_expire_seconds",
-        default=FREE_EXPIRE_SECONDS if fallback_free else FREE_EXPIRE_SECONDS,
+        default=0,
     )
-    if expire == FREE_EXPIRE_SECONDS:
+    if expire <= 0:
+        # planes auth: lista de opciones en segundos (p. ej. ["432000","604800"])
+        opts = limits.get("expire_options") or data.get("expire_options")
+        if isinstance(opts, (list, tuple)) and opts:
+            vals: list[int] = []
+            for o in opts:
+                try:
+                    n = int(o)
+                    if n > 0:
+                        vals.append(n)
+                except (TypeError, ValueError):
+                    continue
+            if vals:
+                expire = min(vals)
+    if expire <= 0:
         days = limits.get("expire_days") or data.get("expire_days")
         if isinstance(days, (int, float)) and days > 0:
             expire = int(days * 86400)
+    if expire <= 0:
+        expire = FREE_EXPIRE_SECONDS
 
     max_files = _int("max_files", "files_max", default=FREE_MAX_FILES)
     chunk = _int(
@@ -148,6 +176,7 @@ def _parse_limits(data: dict, *, fallback_free: bool = False) -> AccountLimits:
     tier = str(
         data.get("tier")
         or data.get("plan")
+        or data.get("plan_name")
         or limits.get("tier")
         or ("free" if fallback_free else "authenticated")
     )
@@ -224,6 +253,32 @@ async def resolve_limits(
     return await get_free_limits(session)
 
 
+def _normalize_upload_meta(data: dict, *, api_key: str | None) -> dict:
+    """Normaliza create-upload: exige upload_id; upload_token solo en free."""
+    upload_id = data.get("upload_id") or data.get("id")
+    token = data.get("upload_token") or data.get("token")
+    if not upload_id:
+        raise DripFilesError("la API no devolvió upload_id")
+    # Free: el token es obligatorio. Auth: basta Authorization Bearer.
+    if not api_key and not token:
+        raise DripFilesError("la API free no devolvió upload_token")
+    out = dict(data)
+    out["upload_id"] = str(upload_id)
+    out["upload_token"] = str(token) if token else None
+    return out
+
+
+def _request_headers(
+    api_key: str | None,
+    upload_token: str | None = None,
+    **extra: str,
+) -> dict[str, str]:
+    headers = {**_auth_headers(api_key), **extra}
+    if upload_token:
+        headers["X-Upload-Token"] = upload_token
+    return headers
+
+
 async def create_upload(
     session: aiohttp.ClientSession,
     *,
@@ -246,13 +301,12 @@ async def create_upload(
             raise DripFilesAuthError(
                 _api_message(data, "API key inválida o sin permiso")
             )
-        if resp.status >= 400 or not data.get("ok"):
+        # 201 Created es éxito habitual
+        if resp.status >= 400 or data.get("ok") is False:
             raise DripFilesError(
                 _api_message(data, f"no se pudo crear el envío (HTTP {resp.status})")
             )
-        if not data.get("upload_id") or not data.get("upload_token"):
-            raise DripFilesError("la API no devolvió upload_id/upload_token")
-        return data
+        return _normalize_upload_meta(data, api_key=api_key)
 
 
 async def _upload_chunk(
@@ -260,7 +314,7 @@ async def _upload_chunk(
     *,
     api_key: str | None,
     upload_id: str,
-    upload_token: str,
+    upload_token: str | None,
     file_uid: str,
     filename: str,
     chunk: bytes,
@@ -278,13 +332,15 @@ async def _upload_chunk(
         filename=filename,
         content_type="application/octet-stream",
     )
-    headers = {
-        **_auth_headers(api_key),
-        "X-Upload-Token": upload_token,
-        "X-File-Uid": file_uid,
-        "X-File-Name": quote(filename),
-        "Content-Range": f"bytes {start}-{end}/{total}",
-    }
+    headers = _request_headers(
+        api_key,
+        upload_token,
+        **{
+            "X-File-Uid": file_uid,
+            "X-File-Name": quote(filename),
+            "Content-Range": f"bytes {start}-{end}/{total}",
+        },
+    )
     url = f"{_base(api_key)}/uploads/{upload_id}/files"
     async with session.post(url, data=form, headers=headers) as resp:
         data = await _read_json(resp)
@@ -292,7 +348,7 @@ async def _upload_chunk(
             raise DripFilesAuthError(
                 _api_message(data, "API key inválida durante la subida")
             )
-        if resp.status >= 400 or not data.get("ok"):
+        if resp.status >= 400 or data.get("ok") is False:
             raise DripFilesError(
                 _api_message(
                     data, f"error subiendo trozo {start}-{end} (HTTP {resp.status})"
@@ -304,29 +360,26 @@ async def _upload_chunk(
 async def complete_upload(
     session: aiohttp.ClientSession,
     upload_id: str,
-    upload_token: str,
+    upload_token: str | None,
     *,
     api_key: str | None = None,
     message: str | None = None,
 ) -> dict:
-    headers = {
-        **_auth_headers(api_key),
-        "X-Upload-Token": upload_token,
-    }
+    headers = _request_headers(api_key, upload_token)
     body: dict = {}
     if message and message.strip():
         body["message"] = message.strip()
     async with session.post(
         f"{_base(api_key)}/uploads/{upload_id}/complete",
         json=body,
-        headers=headers,
+        headers=headers or None,
     ) as resp:
         data = await _read_json(resp)
         if _is_auth_failure(resp.status, data):
             raise DripFilesAuthError(
                 _api_message(data, "API key inválida al completar el envío")
             )
-        if resp.status >= 400 or not data.get("ok"):
+        if resp.status >= 400 or data.get("ok") is False:
             raise DripFilesError(
                 _api_message(data, f"error al completar (HTTP {resp.status})")
             )
@@ -340,15 +393,13 @@ async def get_status(
     *,
     api_key: str | None = None,
 ) -> dict:
-    headers = {**_auth_headers(api_key)}
-    if upload_token:
-        headers["X-Upload-Token"] = upload_token
+    headers = _request_headers(api_key, upload_token)
     async with session.get(
         f"{_base(api_key)}/uploads/{upload_id}",
         headers=headers or None,
     ) as resp:
         data = await _read_json(resp)
-        if resp.status >= 400 or not data.get("ok"):
+        if resp.status >= 400 or data.get("ok") is False:
             raise DripFilesError(
                 _api_message(data, f"error consultando estado (HTTP {resp.status})")
             )
@@ -358,7 +409,7 @@ async def get_status(
 async def wait_ready(
     session: aiohttp.ClientSession,
     upload_id: str,
-    upload_token: str,
+    upload_token: str | None,
     *,
     api_key: str | None = None,
     attempts: int = READY_POLL_ATTEMPTS,
@@ -415,8 +466,8 @@ async def upload_path(
         message=msg,
         expire_seconds=expire_seconds,
     )
-    upload_id = meta["upload_id"]
-    token = meta["upload_token"]
+    upload_id = str(meta["upload_id"])
+    token = meta.get("upload_token")  # None en API autenticada
     chunk = int(chunk_size or meta.get("chunk_size") or DEFAULT_CHUNK)
     if chunk < 64 * 1024:
         chunk = DEFAULT_CHUNK
