@@ -61,6 +61,8 @@ app = Client(
     api_id=cfg.api_id,
     api_hash=cfg.api_hash,
     bot_token=cfg.bot_token,
+    # Replay messages sent while the bot was down (needs the .session file).
+    skip_updates=False,
 )
 
 http: aiohttp.ClientSession
@@ -85,7 +87,8 @@ _KNOWN_CMDS = frozenset(
     }
 )
 _URL_RE = re.compile(r"(?i)^(https?://\S+|www\.\S+\.\S+)")
-_slot_lock = asyncio.Lock()
+_SLOT_WAIT_SECONDS = 3600
+_slot_cond = asyncio.Condition()
 _user_inflight: dict[int, int] = {}
 _global_inflight = 0
 
@@ -146,26 +149,36 @@ def progress_bar(pct: float) -> str:
 
 
 async def acquire_transfer(user_id: int) -> bool:
+    """Espera un hueco (cola al arrancar / ráfagas). False si pasa el timeout."""
     global _global_inflight
-    async with _slot_lock:
-        if _global_inflight >= cfg.max_concurrent_global:
-            return False
-        if _user_inflight.get(user_id, 0) >= cfg.max_concurrent_per_user:
-            return False
-        _user_inflight[user_id] = _user_inflight.get(user_id, 0) + 1
-        _global_inflight += 1
-        return True
+    deadline = time.monotonic() + _SLOT_WAIT_SECONDS
+    async with _slot_cond:
+        while True:
+            under_global = _global_inflight < cfg.max_concurrent_global
+            under_user = _user_inflight.get(user_id, 0) < cfg.max_concurrent_per_user
+            if under_global and under_user:
+                _user_inflight[user_id] = _user_inflight.get(user_id, 0) + 1
+                _global_inflight += 1
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            try:
+                await asyncio.wait_for(_slot_cond.wait(), timeout=remaining)
+            except asyncio.TimeoutError:
+                return False
 
 
 async def release_transfer(user_id: int) -> None:
     global _global_inflight
-    async with _slot_lock:
+    async with _slot_cond:
         _global_inflight = max(0, _global_inflight - 1)
         n = _user_inflight.get(user_id, 1) - 1
         if n <= 0:
             _user_inflight.pop(user_id, None)
         else:
             _user_inflight[user_id] = n
+        _slot_cond.notify_all()
 
 
 def zip_session_active(session: ZipSession) -> bool:

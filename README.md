@@ -250,6 +250,8 @@ docker run -d --name dripfiles-bot \
 
 Mount `downloads` (or your `DATABASE_PATH`) so the SQLite DB (API keys, prefs, re-upload jobs) survives restarts.
 
+Keep the Telegram `*.session` file across restarts (same working directory, or copy it next to the DB). The bot replays files people sent while it was offline; without that session it cannot know where it left off. Telegram only keeps a limited backlog (hours, not days).
+
 ### Private mode
 
 ```env
