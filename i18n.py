@@ -19,6 +19,25 @@ STRINGS: dict[str, dict[str, str]] = {
         "en": "🌍 **Choose language / Elige idioma**",
         "pt": "🌍 **Escolha o idioma / Choose language**",
     },
+    "choose_lang_pending": {
+        "es": (
+            "🌍 **Elige idioma / Choose language**\n\n"
+            "Cuando elijas, subo `{filename}`."
+        ),
+        "en": (
+            "🌍 **Choose language / Elige idioma**\n\n"
+            "After you pick one, I'll upload `{filename}`."
+        ),
+        "pt": (
+            "🌍 **Escolha o idioma / Choose language**\n\n"
+            "Quando escolher, eu envio `{filename}`."
+        ),
+    },
+    "pending_replaced": {
+        "es": "👌 Usaré este archivo: `{filename}`\nElige idioma arriba.",
+        "en": "👌 I'll use this file: `{filename}`\nPick a language above.",
+        "pt": "👌 Vou usar este arquivo: `{filename}`\nEscolha o idioma acima.",
+    },
     "lang_set": {
         "es": "✅ Idioma: **Español**",
         "en": "✅ Language: **English**",
@@ -27,106 +46,71 @@ STRINGS: dict[str, dict[str, str]] = {
     "help": {
         "es": (
             "💧 **DripFilesBot**\n\n"
-            "Mándame un **archivo** y te devuelvo un enlace de "
-            "[DripFiles](https://dripfiles.com).\n\n"
+            "Mándame un **archivo** y te devuelvo un enlace para compartir.\n"
+            "Hasta **~4 GB** con Telegram Premium.\n\n"
+            "Varios archivos: pulsa **📦 ZIP** (o `/zip`) y luego **✅ Listo**.\n"
+            "Si el enlace caduca, **🔄 Resubir**.\n"
             "{api_note}"
-            "Telegram Premium: hasta **~4 GB** al bot.\n\n"
-            "**Comandos**\n"
-            "• `/zip` — acumular y empaquetar\n"
-            "• `/done` `[nombre.zip]` · `/cancel`\n"
-            "{apikey_cmd}"
-            "• `/expire 7` — caducidad preferida (con key)\n"
-            "• `/dev` — wget / curl / off (comando copiable)\n"
-            "• `/lang` — cambiar idioma\n"
-            "• `/settings` · `/me`\n\n"
-            "Tras subir: **💧 Abrir** · **🔄 Resubir**\n\n"
-            "{open_note}"
         ),
         "en": (
             "💧 **DripFilesBot**\n\n"
-            "Send me a **file** and I'll give you a "
-            "[DripFiles](https://dripfiles.com) link.\n\n"
+            "Send me a **file** and I'll give you a shareable link.\n"
+            "Up to **~4 GB** with Telegram Premium.\n\n"
+            "Several files: tap **📦 ZIP** (or `/zip`), then **✅ Done**.\n"
+            "If the link expires, tap **🔄 Re-upload**.\n"
             "{api_note}"
-            "Telegram Premium: up to **~4 GB** to the bot.\n\n"
-            "**Commands**\n"
-            "• `/zip` — collect files into a zip\n"
-            "• `/done` `[name.zip]` · `/cancel`\n"
-            "{apikey_cmd}"
-            "• `/expire 7` — preferred expiry (with key)\n"
-            "• `/dev` — wget / curl / off (copyable command)\n"
-            "• `/lang` — change language\n"
-            "• `/settings` · `/me`\n\n"
-            "After upload: **💧 Open** · **🔄 Re-upload**\n\n"
-            "{open_note}"
         ),
         "pt": (
             "💧 **DripFilesBot**\n\n"
-            "Envie um **arquivo** e eu devolvo um link do "
-            "[DripFiles](https://dripfiles.com).\n\n"
+            "Envie um **arquivo** e eu devolvo um link para compartilhar.\n"
+            "Até **~4 GB** com Telegram Premium.\n\n"
+            "Vários arquivos: toque em **📦 ZIP** (ou `/zip`) e depois **✅ Pronto**.\n"
+            "Se o link expirar, **🔄 Reenviar**.\n"
             "{api_note}"
-            "Telegram Premium: até **~4 GB** para o bot.\n\n"
-            "**Comandos**\n"
-            "• `/zip` — juntar arquivos num zip\n"
-            "• `/done` `[nome.zip]` · `/cancel`\n"
-            "{apikey_cmd}"
-            "• `/expire 7` — validade preferida (com key)\n"
-            "• `/dev` — wget / curl / off (comando copiável)\n"
-            "• `/lang` — mudar idioma\n"
-            "• `/settings` · `/me`\n\n"
-            "Após enviar: **💧 Abrir** · **🔄 Reenviar**\n\n"
-            "{open_note}"
         ),
     },
     "help_api_own_ok": {
-        "es": (
-            "**Por defecto** → API key del bot (si el host la configuró; "
-            "si no, plan free).\n"
-            "**Con tu API key** (`/apikey`) → límites de **tu** cuenta.\n"
-        ),
-        "en": (
-            "**Default** → bot API key (if the host set one; else free plan).\n"
-            "**Your API key** (`/apikey`) → your account limits.\n"
-        ),
-        "pt": (
-            "**Padrão** → API key do bot (se o host configurou; senão free).\n"
-            "**Com sua API key** (`/apikey`) → limites da **sua** conta.\n"
-        ),
-    },
-    "help_api_own_off": {
-        "es": (
-            "Todas las subidas usan la **cuenta del bot** "
-            "(el host no permite API keys personales).\n"
-        ),
-        "en": (
-            "All uploads use the **bot's account** "
-            "(the host disabled personal API keys).\n"
-        ),
-        "pt": (
-            "Todos os envios usam a **conta do bot** "
-            "(o host desativou API keys pessoais).\n"
-        ),
-    },
-    "help_apikey_cmd": {
-        "es": "• `/apikey TU_KEY` · `/apikey clear`\n",
-        "en": "• `/apikey YOUR_KEY` · `/apikey clear`\n",
-        "pt": "• `/apikey SUA_KEY` · `/apikey clear`\n",
+        "es": "\n¿Tienes cuenta DripFiles? Guarda tu key en **Ajustes**.",
+        "en": "\nHave a DripFiles account? Save your key in **Settings**.",
+        "pt": "\nTem conta DripFiles? Salve sua key em **Ajustes**.",
     },
     "apikey_disabled": {
         "es": (
             "🔒 Este bot **no permite** API keys personales.\n\n"
-            "En uso: {key}\n\n"
-            "El host lo controla con `ALLOW_USER_API_KEYS`."
+            "En uso: {key}"
         ),
         "en": (
             "🔒 This bot **does not allow** personal API keys.\n\n"
-            "In use: {key}\n\n"
-            "The host controls this with `ALLOW_USER_API_KEYS`."
+            "In use: {key}"
         ),
         "pt": (
             "🔒 Este bot **não permite** API keys pessoais.\n\n"
-            "Em uso: {key}\n\n"
-            "O host controla com `ALLOW_USER_API_KEYS`."
+            "Em uso: {key}"
         ),
+    },
+    "hint_send_file": {
+        "es": "Mándame un **archivo** y te doy el enlace. Varios: **📦 ZIP**.",
+        "en": "Send me a **file** and I'll give you the link. Several files: **📦 ZIP**.",
+        "pt": "Envie um **arquivo** e eu te dou o link. Vários: **📦 ZIP**.",
+    },
+    "hint_url": {
+        "es": (
+            "Eso es un enlace. Yo no lo descargo: mándame el **archivo** "
+            "y te devuelvo un link de DripFiles."
+        ),
+        "en": (
+            "That's a link. I don't download those — send me the **file** "
+            "and I'll give you a DripFiles URL."
+        ),
+        "pt": (
+            "Isso é um link. Eu não baixo links: envie o **arquivo** "
+            "e eu devolvo um URL do DripFiles."
+        ),
+    },
+    "unknown_cmd": {
+        "es": "No conozco ese comando. Mándame un archivo, o pulsa **Ajustes** / `/help`.",
+        "en": "I don't know that command. Send a file, or tap **Settings** / `/help`.",
+        "pt": "Não conheço esse comando. Envie um arquivo, ou toque em **Ajustes** / `/help`.",
     },
     "open_public": {
         "es": "🌍 Bot **abierto** (cualquiera puede usarlo).",
@@ -157,6 +141,21 @@ STRINGS: dict[str, dict[str, str]] = {
         "es": "🌍 Idioma",
         "en": "🌍 Language",
         "pt": "🌍 Idioma",
+    },
+    "btn_apikey": {
+        "es": "🔑 API key",
+        "en": "🔑 API key",
+        "pt": "🔑 API key",
+    },
+    "btn_expire": {
+        "es": "⏱ Caducidad",
+        "en": "⏱ Expiry",
+        "pt": "⏱ Validade",
+    },
+    "btn_me": {
+        "es": "💧 Límites",
+        "en": "💧 Limits",
+        "pt": "💧 Limites",
     },
     "btn_zip_done": {
         "es": "✅ Listo",
@@ -198,7 +197,7 @@ STRINGS: dict[str, dict[str, str]] = {
             "✅ **Listo**\n\n"
             "📄 `{filename}`\n"
             "{count_line}"
-            "💧 [Descargar en DripFiles]({url})\n"
+            "💧 `{url}`\n"
             "{expire_note} {tier_note}\n"
             "🔄 Si caduca, pulsa **Resubir**."
         ),
@@ -206,7 +205,7 @@ STRINGS: dict[str, dict[str, str]] = {
             "✅ **Done**\n\n"
             "📄 `{filename}`\n"
             "{count_line}"
-            "💧 [Download on DripFiles]({url})\n"
+            "💧 `{url}`\n"
             "{expire_note} {tier_note}\n"
             "🔄 If it expires, tap **Re-upload**."
         ),
@@ -214,7 +213,7 @@ STRINGS: dict[str, dict[str, str]] = {
             "✅ **Pronto**\n\n"
             "📄 `{filename}`\n"
             "{count_line}"
-            "💧 [Baixar no DripFiles]({url})\n"
+            "💧 `{url}`\n"
             "{expire_note} {tier_note}\n"
             "🔄 Se expirar, toque em **Reenviar**."
         ),
@@ -268,7 +267,6 @@ STRINGS: dict[str, dict[str, str]] = {
             "Caducidad preferida: {expire}\n"
             "Modo dev: {dev}\n\n"
             "{limits}"
-            "\n`/apikey` · `/expire` · `/dev` · `/lang` · `/me`"
         ),
         "en": (
             "⚙️ **Your settings**\n\n"
@@ -277,7 +275,6 @@ STRINGS: dict[str, dict[str, str]] = {
             "Preferred expiry: {expire}\n"
             "Dev mode: {dev}\n\n"
             "{limits}"
-            "\n`/apikey` · `/expire` · `/dev` · `/lang` · `/me`"
         ),
         "pt": (
             "⚙️ **Suas configurações**\n\n"
@@ -286,7 +283,6 @@ STRINGS: dict[str, dict[str, str]] = {
             "Validade preferida: {expire}\n"
             "Modo dev: {dev}\n\n"
             "{limits}"
-            "\n`/apikey` · `/expire` · `/dev` · `/lang` · `/me`"
         ),
     },
     "expire_default": {
@@ -298,6 +294,11 @@ STRINGS: dict[str, dict[str, str]] = {
         "es": "**{n}** día(s)",
         "en": "**{n}** day(s)",
         "pt": "**{n}** dia(s)",
+    },
+    "expire_hours": {
+        "es": "**{n}** h",
+        "en": "**{n}** h",
+        "pt": "**{n}** h",
     },
     "dev_state_off": {
         "es": "**OFF**",
@@ -521,6 +522,16 @@ STRINGS: dict[str, dict[str, str]] = {
         "en": "❌ Error: {err}",
         "pt": "❌ Erro: {err}",
     },
+    "err_busy": {
+        "es": "⏳ Demasiadas transferencias a la vez. Espera un momento e inténtalo de nuevo.",
+        "en": "⏳ Too many transfers at once. Wait a moment and try again.",
+        "pt": "⏳ Transferências demais ao mesmo tempo. Espere um pouco e tente de novo.",
+    },
+    "err_disk": {
+        "es": "❌ Poco espacio en disco en el servidor. Prueba más tarde.",
+        "en": "❌ The server is low on disk space. Try again later.",
+        "pt": "❌ Pouco espaço em disco no servidor. Tente mais tarde.",
+    },
     "err_drip": {
         "es": "❌ DripFiles: {err}",
         "en": "❌ DripFiles: {err}",
@@ -649,15 +660,45 @@ STRINGS: dict[str, dict[str, str]] = {
         "en": "⚠️ Your API key is invalid → using **free** plan (failover).\n",
         "pt": "⚠️ Sua API key é inválida → usando plano **free** (failover).\n",
     },
+    "failover_auth_note_bot": {
+        "es": "⚠️ La API key del bot no es válida → usando plan **free** (failover).\n",
+        "en": "⚠️ The bot API key is invalid → using **free** plan (failover).\n",
+        "pt": "⚠️ A API key do bot é inválida → usando plano **free** (failover).\n",
+    },
+    "failover_auth_note_bot_off": {
+        "es": "⚠️ La API key del bot no es válida → usando plan **free** (failover).\n",
+        "en": "⚠️ The bot API key is invalid → using **free** plan (failover).\n",
+        "pt": "⚠️ A API key do bot é inválida → usando plano **free** (failover).\n",
+    },
     "failover_me_note": {
-        "es": "⚠️ No pude verificar tu API key → usando plan **free** por ahora.\n",
-        "en": "⚠️ Could not verify your API key → using **free** plan for now.\n",
-        "pt": "⚠️ Não consegui verificar sua API key → usando plano **free** por agora.\n",
+        "es": "⚠️ No pude verificar tu API key ahora mismo. Sigo usándola; límites provisionales.\n",
+        "en": "⚠️ Could not verify your API key right now. Still using it; provisional limits.\n",
+        "pt": "⚠️ Não consegui verificar sua API key agora. Continuarei usando-a; limites provisórios.\n",
+    },
+    "failover_me_note_bot": {
+        "es": "⚠️ No pude verificar la API key del bot. Sigo usándola; límites provisionales.\n",
+        "en": "⚠️ Could not verify the bot API key. Still using it; provisional limits.\n",
+        "pt": "⚠️ Não consegui verificar a API key do bot. Continuarei usando-a; limites provisórios.\n",
+    },
+    "failover_me_note_bot_off": {
+        "es": "⚠️ No pude verificar la API key del bot. Sigo usándola; límites provisionales.\n",
+        "en": "⚠️ Could not verify the bot API key. Still using it; provisional limits.\n",
+        "pt": "⚠️ Não consegui verificar a API key do bot. Continuarei usando-a; limites provisórios.\n",
     },
     "failover_retry_free": {
         "es": "⚠️ API key rechazada. Reintentando con plan **free** · `{filename}`…",
         "en": "⚠️ API key rejected. Retrying with **free** plan · `{filename}`…",
         "pt": "⚠️ API key rejeitada. Tentando de novo com plano **free** · `{filename}`…",
+    },
+    "failover_retry_free_bot": {
+        "es": "⚠️ Key del bot rechazada. Reintentando con plan **free** · `{filename}`…",
+        "en": "⚠️ Bot API key rejected. Retrying with **free** plan · `{filename}`…",
+        "pt": "⚠️ Key do bot rejeitada. Tentando de novo com plano **free** · `{filename}`…",
+    },
+    "failover_retry_free_bot_off": {
+        "es": "⚠️ Key del bot rechazada. Reintentando con plan **free** · `{filename}`…",
+        "en": "⚠️ Bot API key rejected. Retrying with **free** plan · `{filename}`…",
+        "pt": "⚠️ Key do bot rejeitada. Tentando de novo com plano **free** · `{filename}`…",
     },
     "failover_too_big": {
         "es": (
@@ -673,10 +714,45 @@ STRINGS: dict[str, dict[str, str]] = {
             "({limit}). Atualize a key com `/apikey`."
         ),
     },
+    "failover_too_big_bot": {
+        "es": (
+            "La key del bot no es válida y el archivo supera el free "
+            "({limit}). Puedes usar la tuya con `/apikey`."
+        ),
+        "en": (
+            "The bot API key is invalid and the file exceeds the free limit "
+            "({limit}). You can add yours with `/apikey`."
+        ),
+        "pt": (
+            "A key do bot é inválida e o arquivo supera o free "
+            "({limit}). Você pode usar a sua com `/apikey`."
+        ),
+    },
+    "failover_too_big_bot_off": {
+        "es": (
+            "La key del bot no es válida y el archivo supera el free ({limit})."
+        ),
+        "en": (
+            "The bot API key is invalid and the file exceeds the free limit ({limit})."
+        ),
+        "pt": (
+            "A key do bot é inválida e o arquivo supera o free ({limit})."
+        ),
+    },
     "failover_success_note": {
         "es": "⚠️ Subido con plan **free** (tu API key falló). Revisa `/apikey`.",
         "en": "⚠️ Uploaded on **free** plan (your API key failed). Check `/apikey`.",
         "pt": "⚠️ Enviado no plano **free** (sua API key falhou). Veja `/apikey`.",
+    },
+    "failover_success_note_bot": {
+        "es": "⚠️ Subido con plan **free** (falló la key del bot).",
+        "en": "⚠️ Uploaded on **free** plan (the bot API key failed).",
+        "pt": "⚠️ Enviado no plano **free** (a key do bot falhou).",
+    },
+    "failover_success_note_bot_off": {
+        "es": "⚠️ Subido con plan **free** (falló la key del bot).",
+        "en": "⚠️ Uploaded on **free** plan (the bot API key failed).",
+        "pt": "⚠️ Enviado no plano **free** (a key do bot falhou).",
     },
     "expire_help": {
         "es": (
@@ -728,9 +804,14 @@ STRINGS: dict[str, dict[str, str]] = {
         "pt": "✅ Validade preferida: **{days}** dia(s).{note}",
     },
     "expire_no_key_note": {
-        "es": "\n\n⚠️ No tienes API key: el free sigue en ~2 días. Añade una con `/apikey`.",
-        "en": "\n\n⚠️ No API key: free stays ~2 days. Add one with `/apikey`.",
-        "pt": "\n\n⚠️ Sem API key: o free continua ~2 dias. Adicione com `/apikey`.",
+        "es": "\n\n⚠️ Estás en plan free: los enlaces siguen caducando en ~2 días. Puedes añadir tu key en **Ajustes**.",
+        "en": "\n\n⚠️ You're on the free plan: links still expire in ~2 days. You can add your key in **Settings**.",
+        "pt": "\n\n⚠️ Você está no plano free: os links continuam expirando em ~2 dias. Pode adicionar sua key em **Ajustes**.",
+    },
+    "expire_no_key_note_off": {
+        "es": "\n\n⚠️ Estás en plan free: los enlaces siguen caducando en ~2 días.",
+        "en": "\n\n⚠️ You're on the free plan: links still expire in ~2 days.",
+        "pt": "\n\n⚠️ Você está no plano free: os links continuam expirando em ~2 dias.",
     },
     "me_loading": {
         "es": "🔎 Consultando DripFiles…",

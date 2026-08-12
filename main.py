@@ -19,7 +19,7 @@ from pathlib import Path
 
 import aiohttp
 from pyrogram import Client, enums, filters, idle
-from pyrogram.errors import MessageNotModified
+from pyrogram.errors import FloodWait, MessageNotModified
 from pyrogram.types import (
     BotCommand,
     CallbackQuery,
@@ -68,6 +68,26 @@ database: Database
 
 background_tasks: set[asyncio.Task] = set()
 zip_sessions: dict[int, "ZipSession"] = {}
+pending_first_file: dict[int, Message] = {}
+_KNOWN_CMDS = frozenset(
+    {
+        "start",
+        "help",
+        "lang",
+        "settings",
+        "me",
+        "apikey",
+        "expire",
+        "dev",
+        "zip",
+        "cancel",
+        "done",
+    }
+)
+_URL_RE = re.compile(r"(?i)^(https?://\S+|www\.\S+\.\S+)")
+_slot_lock = asyncio.Lock()
+_user_inflight: dict[int, int] = {}
+_global_inflight = 0
 
 ZIP_SESSION_TIMEOUT = cfg.zip_timeout_minutes * 60
 _SAFE_NAME_RE = re.compile(r"[^\w.\- ()\[\]]+", re.UNICODE)
@@ -90,6 +110,8 @@ class ZipSession:
     last_activity: float = field(default_factory=time.monotonic)
     status_msg: Message | None = None
     busy: bool = False
+    closed: bool = False
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     @property
     def total_size(self) -> int:
@@ -121,6 +143,57 @@ def human_size(size: float) -> str:
 def progress_bar(pct: float) -> str:
     filled = min(20, int(pct / 5))
     return "█" * filled + "░" * (20 - filled)
+
+
+async def acquire_transfer(user_id: int) -> bool:
+    global _global_inflight
+    async with _slot_lock:
+        if _global_inflight >= cfg.max_concurrent_global:
+            return False
+        if _user_inflight.get(user_id, 0) >= cfg.max_concurrent_per_user:
+            return False
+        _user_inflight[user_id] = _user_inflight.get(user_id, 0) + 1
+        _global_inflight += 1
+        return True
+
+
+async def release_transfer(user_id: int) -> None:
+    global _global_inflight
+    async with _slot_lock:
+        _global_inflight = max(0, _global_inflight - 1)
+        n = _user_inflight.get(user_id, 1) - 1
+        if n <= 0:
+            _user_inflight.pop(user_id, None)
+        else:
+            _user_inflight[user_id] = n
+
+
+def zip_session_active(session: ZipSession) -> bool:
+    return (
+        not session.closed
+        and not session.busy
+        and zip_sessions.get(session.user_id) is session
+    )
+
+
+def ensure_disk(lang: str, needed: int = 0) -> None:
+    reserve = cfg.min_free_disk_bytes
+    if reserve <= 0 and needed <= 0:
+        return
+    os.makedirs(cfg.download_dir, exist_ok=True)
+    free = shutil.disk_usage(cfg.download_dir).free
+    if free < reserve + max(needed, 0):
+        raise dripfiles_mod.DripFilesError(t(lang, "err_disk"))
+
+
+def failover_text(lang: str, user: UserSettings, kind: str, **kwargs) -> str:
+    if user_own_api_key(user):
+        key = f"failover_{kind}"
+    elif cfg.allow_user_api_keys:
+        key = f"failover_{kind}_bot"
+    else:
+        key = f"failover_{kind}_bot_off"
+    return t(lang, key, **kwargs)
 
 
 def spawn(coro) -> asyncio.Task:
@@ -187,26 +260,9 @@ def display_api_key(user: UserSettings, lang: str) -> str:
     return t(lang, "no_api_key")
 
 
-def open_note(lang: str) -> str:
-    if cfg.allowed_users:
-        return t(lang, "open_whitelist", n=len(cfg.allowed_users))
-    return t(lang, "open_public")
-
-
 def help_text(lang: str) -> str:
-    if cfg.allow_user_api_keys:
-        api_note = t(lang, "help_api_own_ok")
-        apikey_cmd = t(lang, "help_apikey_cmd")
-    else:
-        api_note = t(lang, "help_api_own_off")
-        apikey_cmd = ""
-    return t(
-        lang,
-        "help",
-        open_note=open_note(lang),
-        api_note=api_note,
-        apikey_cmd=apikey_cmd,
-    )
+    api_note = t(lang, "help_api_own_ok") if cfg.allow_user_api_keys else ""
+    return t(lang, "help", api_note=api_note)
 
 
 def lang_keyboard() -> InlineKeyboardMarkup:
@@ -232,13 +288,33 @@ def help_keyboard(lang: str) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     t(lang, "btn_settings"), callback_data="ui:settings"
                 ),
-                InlineKeyboardButton(t(lang, "btn_dev"), callback_data="ui:dev"),
-            ],
-            [
                 InlineKeyboardButton(t(lang, "btn_lang"), callback_data="ui:lang"),
             ],
         ]
     )
+
+
+def settings_keyboard(lang: str) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(t(lang, "btn_lang"), callback_data="ui:lang"),
+            InlineKeyboardButton(t(lang, "btn_dev"), callback_data="ui:dev"),
+        ],
+        [
+            InlineKeyboardButton(t(lang, "btn_expire"), callback_data="ui:expire"),
+            InlineKeyboardButton(t(lang, "btn_me"), callback_data="ui:me"),
+        ],
+    ]
+    if cfg.allow_user_api_keys:
+        rows.insert(
+            1,
+            [
+                InlineKeyboardButton(
+                    t(lang, "btn_apikey"), callback_data="ui:apikey"
+                )
+            ],
+        )
+    return InlineKeyboardMarkup(rows)
 
 
 def zip_keyboard(lang: str) -> InlineKeyboardMarkup:
@@ -384,14 +460,21 @@ async def free_limits_capped() -> dripfiles_mod.AccountLimits:
 async def user_limits(
     user: UserSettings,
 ) -> tuple[dripfiles_mod.AccountLimits, int | None, str | None]:
-    """Devuelve (límites, expire_seconds, aviso_failover).
+    """Devuelve (límites, expire_seconds, aviso). aviso: auth | me_error | None.
 
-    Key efectiva = del usuario o del bot. Si falla → free + aviso.
+    Solo un 401/403 marca auth (subir por free). Un fallo de red en /me
+    no descarta la key: se sigue el camino autenticado con tope Telegram.
     """
     api_key = effective_api_key(user)
     if not api_key:
         limits = await free_limits_capped()
         return limits, None, None
+
+    preferred_expire = (
+        int(user.expire_days * 86400)
+        if user.expire_days and user.expire_days > 0
+        else None
+    )
 
     try:
         limits = await dripfiles_mod.get_account(http, api_key)
@@ -399,15 +482,21 @@ async def user_limits(
         free = await free_limits_capped()
         return free, None, "auth"
     except dripfiles_mod.DripFilesError:
-        # red / 5xx al consultar /me: no tumbar la subida si free sirve
-        free = await free_limits_capped()
-        return free, None, "me_error"
+        return (
+            dripfiles_mod.AccountLimits(
+                tier="authenticated",
+                max_size_bytes=dripfiles_mod.TELEGRAM_MAX_SIZE,
+                max_files=dripfiles_mod.FREE_MAX_FILES,
+                expire_seconds=preferred_expire or 0,
+                chunk_size=dripfiles_mod.DEFAULT_CHUNK,
+                raw={},
+            ),
+            preferred_expire,
+            "me_error",
+        )
 
     effective_max = min(limits.max_size_bytes, dripfiles_mod.TELEGRAM_MAX_SIZE)
-    if user.expire_days and user.expire_days > 0:
-        expire = int(user.expire_days * 86400)
-    else:
-        expire = limits.expire_seconds
+    expire = preferred_expire if preferred_expire else limits.expire_seconds
     return (
         dripfiles_mod.AccountLimits(
             tier=limits.tier,
@@ -428,7 +517,7 @@ async def settings_text(user_id: int) -> str:
     try:
         limits, expire, failover = await user_limits(user)
         want = ""
-        if effective_api_key(user) and expire and not failover:
+        if effective_api_key(user) and expire and failover != "auth":
             want = t(lang, "want_expire", days=expire / 86400)
         lim_line = t(
             lang,
@@ -439,9 +528,9 @@ async def settings_text(user_id: int) -> str:
             want_expire=want,
         )
         if failover == "auth":
-            lim_line += t(lang, "failover_auth_note")
+            lim_line += failover_text(lang, user, "auth_note")
         elif failover == "me_error":
-            lim_line += t(lang, "failover_me_note")
+            lim_line += failover_text(lang, user, "me_note")
     except dripfiles_mod.DripFilesError as exc:
         lim_line = t(lang, "limits_error", err=exc)
 
@@ -490,6 +579,8 @@ async def download_to_path(
             )
         )
 
+    ensure_disk(lang, size_hint or 0)
+
     last_edit = [0.0]
 
     async def on_progress(current: int, total: int) -> None:
@@ -512,16 +603,32 @@ async def download_to_path(
             text = f"{head}\n{human_size(current)}"
         await safe_edit(progress, text)
 
-    if message is not None:
-        path = await message.download(file_name=dest, progress=on_progress)
-        fid = media_file_id(message) or ""
-    elif file_id:
-        path = await app.download_media(
-            file_id, file_name=dest, progress=on_progress
-        )
-        fid = file_id
-    else:
+    async def _download_once() -> tuple[str, str]:
+        if message is not None:
+            got = await message.download(file_name=dest, progress=on_progress)
+            return got, media_file_id(message) or ""
+        if file_id:
+            got = await app.download_media(
+                file_id, file_name=dest, progress=on_progress
+            )
+            return got, file_id
         raise RuntimeError("message or file_id required")
+
+    path = None
+    fid = ""
+    last_flood = 0
+    for attempt in range(6):
+        try:
+            path, fid = await _download_once()
+            break
+        except FloodWait as exc:
+            wait = int(getattr(exc, "value", None) or getattr(exc, "x", 1) or 1)
+            wait = min(max(wait, 1), 180)
+            last_flood = wait
+            log.warning("FloodWait %ss (intento %s)", wait, attempt + 1)
+            await asyncio.sleep(wait)
+    else:
+        raise RuntimeError(f"FloodWait {last_flood}s")
 
     if not path or not os.path.isfile(path):
         raise RuntimeError("Telegram did not return the file")
@@ -639,15 +746,14 @@ async def upload_to_dripfiles(
         free = await free_limits_capped()
         if size > free.max_size_bytes:
             raise dripfiles_mod.DripFilesError(
-                t(
-                    lang,
-                    "failover_too_big",
-                    limit=human_size(free.max_size_bytes),
+                failover_text(
+                    lang, user, "too_big", limit=human_size(free.max_size_bytes)
                 )
             )
         if reason:
             await safe_edit(
-                progress, t(lang, "failover_retry_free", filename=filename)
+                progress,
+                failover_text(lang, user, "retry_free", filename=filename),
             )
         result = await _do(
             api_key=None,
@@ -706,9 +812,11 @@ async def show_success(
     failover: bool = False,
 ) -> None:
     lang = normalize_lang(user.lang)
-    eff_expire = expire_seconds
-    if not eff_expire and isinstance(expires_at, (int, float)):
-        remaining = int(expires_at - time.time())
+    url = (url or "").replace("`", "").replace("\n", "").replace("\r", "")
+    eff_expire = dripfiles_mod.coerce_positive_int(expire_seconds)
+    expires_at_n = dripfiles_mod.coerce_positive_int(expires_at)
+    if not eff_expire and expires_at_n:
+        remaining = int(expires_at_n - time.time())
         if remaining > 0:
             eff_expire = remaining
 
@@ -720,13 +828,15 @@ async def show_success(
         if days >= 1:
             expire_note = f"⏱ {t(lang, 'expire_days', n=int(round(days)))}."
         else:
-            expire_note = f"⏱ **{eff_expire // 3600}** h."
+            expire_note = f"⏱ {t(lang, 'expire_hours', n=eff_expire // 3600)}."
     else:
         # free ~2 días
         expire_note = f"⏱ {t(lang, 'expire_days', n=2)}."
 
     tier_note = t(lang, "tier_note", tier=tier) if tier else ""
-    failover_note = f"\n{t(lang, 'failover_success_note')}" if failover else ""
+    failover_note = (
+        f"\n{failover_text(lang, user, 'success_note')}" if failover else ""
+    )
     text = t(
         lang,
         "success",
@@ -793,15 +903,51 @@ async def register_job(
     return token
 
 
+def _pending_filename(message: Message) -> str:
+    _, raw = media_meta(message)
+    return safe_filename(raw)
+
+
+async def prompt_lang(
+    message: Message, *, pending_name: str | None = None
+) -> None:
+    key = "choose_lang_pending" if pending_name else "choose_lang"
+    kwargs = {"filename": pending_name} if pending_name else {}
+    await message.reply_text(
+        t(DEFAULT_LANG, key, **kwargs),
+        reply_markup=lang_keyboard(),
+    )
+
+
+def stash_pending_media(message: Message) -> bool:
+    """Guarda el archivo para subirlo al elegir idioma. True si ya había uno."""
+    if not message.from_user or not media_file_id(message):
+        return False
+    uid = message.from_user.id
+    replaced = uid in pending_first_file
+    pending_first_file[uid] = message
+    return replaced
+
+
 async def ensure_lang(message: Message) -> UserSettings | None:
-    """Si no hay idioma, pide elegir y devuelve None."""
+    """Si no hay idioma, pide elegir y devuelve None. No tira el archivo."""
     user = await database.get_user(message.from_user.id)
     if user.lang:
         return user
-    await message.reply_text(
-        t(DEFAULT_LANG, "choose_lang"),
-        reply_markup=lang_keyboard(),
-    )
+    pending_name = None
+    if media_file_id(message):
+        replaced = stash_pending_media(message)
+        pending_name = _pending_filename(message)
+        if replaced:
+            await message.reply_text(
+                t(DEFAULT_LANG, "pending_replaced", filename=pending_name)
+            )
+            return None
+    else:
+        pending = pending_first_file.get(message.from_user.id)
+        if pending:
+            pending_name = _pending_filename(pending)
+    await prompt_lang(message, pending_name=pending_name)
     return None
 
 
@@ -810,12 +956,8 @@ async def ensure_lang(message: Message) -> UserSettings | None:
 
 @app.on_message(filters.command(["start", "help"]) & filters.private & auth)
 async def cmd_help(_: Client, message: Message):
-    user = await database.get_user(message.from_user.id)
-    if not user.lang:
-        await message.reply_text(
-            t(DEFAULT_LANG, "choose_lang"),
-            reply_markup=lang_keyboard(),
-        )
+    user = await ensure_lang(message)
+    if not user:
         return
     lang = normalize_lang(user.lang)
     await message.reply_text(
@@ -840,16 +982,13 @@ async def cmd_settings(_: Client, message: Message):
     await message.reply_text(
         await settings_text(message.from_user.id),
         link_preview_options=_NO_PREVIEW,
+        reply_markup=settings_keyboard(await lang_of(message.from_user.id)),
     )
 
 
-@app.on_message(filters.command("me") & filters.private & auth)
-async def cmd_me(_: Client, message: Message):
-    user = await ensure_lang(message)
-    if not user:
-        return
+async def send_me_card(origin: Message, user: UserSettings) -> None:
     lang = normalize_lang(user.lang)
-    status = await message.reply_text(t(lang, "me_loading"))
+    status = await origin.reply_text(t(lang, "me_loading"))
     try:
         api_key = effective_api_key(user)
         limits = await dripfiles_mod.resolve_limits(http, api_key)
@@ -875,6 +1014,14 @@ async def cmd_me(_: Client, message: Message):
         )
     except dripfiles_mod.DripFilesError as exc:
         await safe_edit(status, t(lang, "err_drip", err=exc))
+
+
+@app.on_message(filters.command("me") & filters.private & auth)
+async def cmd_me(_: Client, message: Message):
+    user = await ensure_lang(message)
+    if not user:
+        return
+    await send_me_card(message, user)
 
 
 @app.on_message(filters.command("apikey") & filters.private & auth)
@@ -971,9 +1118,12 @@ async def cmd_expire(_: Client, message: Message):
         return
 
     await database.upsert_user(user_id, expire_days=days)
-    note = (
-        t(lang, "expire_no_key_note") if not effective_api_key(user) else ""
-    )
+    if effective_api_key(user):
+        note = ""
+    elif cfg.allow_user_api_keys:
+        note = t(lang, "expire_no_key_note")
+    else:
+        note = t(lang, "expire_no_key_note_off")
     await message.reply_text(t(lang, "expire_set", days=days, note=note))
 
 
@@ -1054,7 +1204,8 @@ async def cmd_done(_: Client, message: Message):
 @app.on_callback_query(filters.regex(r"^lang:(es|en|pt)$") & auth)
 async def lang_callback(_: Client, query: CallbackQuery):
     code = query.data.split(":", 1)[1]
-    await database.upsert_user(query.from_user.id, lang=code)
+    user_id = query.from_user.id
+    await database.upsert_user(user_id, lang=code)
     await query.answer()
     try:
         await query.message.edit_text(t(code, "lang_set"))
@@ -1065,9 +1216,14 @@ async def lang_callback(_: Client, query: CallbackQuery):
         link_preview_options=_NO_PREVIEW,
         reply_markup=help_keyboard(code),
     )
+    pending = pending_first_file.pop(user_id, None)
+    if pending:
+        spawn(handle_single_file(pending))
 
 
-@app.on_callback_query(filters.regex(r"^ui:(settings|dev|lang)$") & auth)
+@app.on_callback_query(
+    filters.regex(r"^ui:(settings|dev|lang|apikey|expire|me)$") & auth
+)
 async def ui_callback(_: Client, query: CallbackQuery):
     action = query.data.split(":", 1)[1]
     user_id = query.from_user.id
@@ -1084,7 +1240,9 @@ async def ui_callback(_: Client, query: CallbackQuery):
 
     if action == "settings":
         await query.message.reply_text(
-            await settings_text(user_id), link_preview_options=_NO_PREVIEW
+            await settings_text(user_id),
+            link_preview_options=_NO_PREVIEW,
+            reply_markup=settings_keyboard(lang),
         )
     elif action == "dev":
         state = (
@@ -1100,6 +1258,26 @@ async def ui_callback(_: Client, query: CallbackQuery):
         await query.message.reply_text(
             t(lang, "choose_lang"), reply_markup=lang_keyboard()
         )
+    elif action == "apikey":
+        if not cfg.allow_user_api_keys:
+            await query.message.reply_text(
+                t(lang, "apikey_disabled", key=display_api_key(user, lang)),
+                link_preview_options=_NO_PREVIEW,
+            )
+            return
+        await query.message.reply_text(
+            t(lang, "apikey_help", key=display_api_key(user, lang)),
+            link_preview_options=_NO_PREVIEW,
+        )
+    elif action == "expire":
+        cur = (
+            t(lang, "expire_days", n=user.expire_days)
+            if user.expire_days
+            else t(lang, "expire_default")
+        )
+        await query.message.reply_text(t(lang, "expire_help", cur=cur))
+    elif action == "me":
+        await send_me_card(query.message, user)
 
 
 @app.on_callback_query(filters.regex(r"^dev:(wget|curl|off)$") & auth)
@@ -1199,6 +1377,35 @@ async def handle_media(_: Client, message: Message):
     spawn(handle_single_file(message))
 
 
+@app.on_message(filters.private & auth & filters.text, group=8)
+async def fallback_text(_: Client, message: Message):
+    text = (message.text or "").strip()
+    if not text:
+        return
+    if text.startswith("/"):
+        cmd = text[1:].split()[0].split("@", 1)[0].lower()
+        if cmd in _KNOWN_CMDS:
+            return
+    user = await ensure_lang(message)
+    if not user:
+        return
+    lang = normalize_lang(user.lang)
+    if text.startswith("/"):
+        await message.reply_text(
+            t(lang, "unknown_cmd"),
+            reply_markup=help_keyboard(lang),
+        )
+        return
+    if _URL_RE.match(text):
+        await message.reply_text(t(lang, "hint_url"))
+        return
+    await message.reply_text(
+        t(lang, "hint_send_file"),
+        reply_markup=help_keyboard(lang),
+        link_preview_options=_NO_PREVIEW,
+    )
+
+
 async def start_zip_session(
     message: Message, *, reply_to_user_id: int | None = None
 ) -> None:
@@ -1244,32 +1451,50 @@ async def start_zip_session(
 
 
 async def stage_for_zip(message: Message, session: ZipSession) -> None:
-    session.touch()
     user = await database.get_user(session.user_id)
     lang = normalize_lang(user.lang)
-    try:
-        limits, _, _ = await user_limits(user)
-    except dripfiles_mod.DripFilesError as exc:
-        await message.reply_text(t(lang, "err_drip", err=exc))
+    if not zip_session_active(session):
+        return
+    if not await acquire_transfer(session.user_id):
+        await message.reply_text(t(lang, "err_busy"))
         return
 
-    size_hint, raw_name = media_meta(message)
-    name = safe_filename(raw_name)
+    progress: Message | None = None
+    try:
+        session.touch()
+        try:
+            limits, _, _ = await user_limits(user)
+        except dripfiles_mod.DripFilesError as exc:
+            await message.reply_text(t(lang, "err_drip", err=exc))
+            return
 
-    if size_hint and session.total_size + size_hint > limits.max_size_bytes:
-        await message.reply_text(
-            t(
-                lang,
-                "zip_too_big",
-                limit=human_size(limits.max_size_bytes),
-                current=human_size(session.total_size),
-                extra=human_size(size_hint),
+        if not zip_session_active(session):
+            return
+
+        size_hint, raw_name = media_meta(message)
+        name = safe_filename(raw_name)
+
+        async with session.lock:
+            if not zip_session_active(session):
+                return
+            over_hint = bool(
+                size_hint
+                and session.total_size + size_hint > limits.max_size_bytes
             )
-        )
-        return
+            current = session.total_size
+        if over_hint:
+            await message.reply_text(
+                t(
+                    lang,
+                    "zip_too_big",
+                    limit=human_size(limits.max_size_bytes),
+                    current=human_size(current),
+                    extra=human_size(size_hint or 0),
+                )
+            )
+            return
 
-    progress = await message.reply_text(t(lang, "zip_add", name=name))
-    try:
+        progress = await message.reply_text(t(lang, "zip_add", name=name))
         staged = await download_telegram_media(
             message,
             session.work_dir,
@@ -1277,8 +1502,27 @@ async def stage_for_zip(message: Message, session: ZipSession) -> None:
             progress=progress,
             lang=lang,
         )
-        if session.total_size + staged.size > limits.max_size_bytes:
-            os.remove(staged.path)
+
+        n = 0
+        total = 0
+        over_after = False
+        async with session.lock:
+            if not zip_session_active(session):
+                try:
+                    os.remove(staged.path)
+                except OSError:
+                    pass
+                return
+            if session.total_size + staged.size > limits.max_size_bytes:
+                os.remove(staged.path)
+                over_after = True
+            else:
+                session.files.append(staged)
+                session.touch()
+                n = len(session.files)
+                total = session.total_size
+
+        if over_after:
             await safe_edit(
                 progress,
                 t(
@@ -1289,9 +1533,6 @@ async def stage_for_zip(message: Message, session: ZipSession) -> None:
             )
             return
 
-        session.files.append(staged)
-        session.touch()
-        n = len(session.files)
         await safe_edit(
             progress,
             t(
@@ -1300,32 +1541,29 @@ async def stage_for_zip(message: Message, session: ZipSession) -> None:
                 n=n,
                 name=staged.filename,
                 size=human_size(staged.size),
-                total=human_size(session.total_size),
+                total=human_size(total),
             ),
         )
         await refresh_zip_status(session, lang)
     except dripfiles_mod.DripFilesError as exc:
-        await safe_edit(progress, t(lang, "err_drip", err=exc))
+        if progress:
+            await safe_edit(progress, t(lang, "err_drip", err=exc))
+        else:
+            await message.reply_text(t(lang, "err_drip", err=exc))
     except Exception as exc:
         log.exception("Error añadiendo archivo al zip")
-        await safe_edit(progress, t(lang, "err_download", err=exc))
+        if progress:
+            await safe_edit(progress, t(lang, "err_download", err=exc))
+        else:
+            await message.reply_text(t(lang, "err_download", err=exc))
+    finally:
+        await release_transfer(session.user_id)
 
 
 async def refresh_zip_status(session: ZipSession, lang: str) -> None:
     if not session.status_msg:
         return
     n = len(session.files)
-    lines = [
-        t(
-            lang,
-            "zip_active",
-            limit="—",
-            timeout=cfg.zip_timeout_minutes,
-            n=n,
-            size=human_size(session.total_size),
-        ).split("\n\n")[0],  # header only-ish; rebuild cleanly below
-    ]
-    # rebuild clean status
     body = [
         f"📦 **ZIP** · **{n}** · {human_size(session.total_size)}",
         "",
@@ -1353,30 +1591,48 @@ async def finish_zip(
     user = await database.get_user(user_id)
     lang = normalize_lang(user.lang)
 
-    if session.busy:
-        if not from_callback:
-            await message.reply_text(t(lang, "zip_busy"))
-        return
-    if not session.files:
-        await message.reply_text(t(lang, "zip_empty"))
+    async with session.lock:
+        if session.busy or session.closed:
+            if not from_callback:
+                await message.reply_text(t(lang, "zip_busy"))
+            return
+        if not session.files:
+            await message.reply_text(t(lang, "zip_empty"))
+            return
+
+    if not await acquire_transfer(user_id):
+        await message.reply_text(t(lang, "err_busy"))
         return
 
-    session.busy = True
-    session.touch()
-    zip_sessions.pop(user_id, None)
+    async with session.lock:
+        if (
+            session.busy
+            or session.closed
+            or zip_sessions.get(user_id) is not session
+        ):
+            await release_transfer(user_id)
+            return
+        if not session.files:
+            await release_transfer(user_id)
+            await message.reply_text(t(lang, "zip_empty"))
+            return
+        session.busy = True
+        session.closed = True
+        session.touch()
+        files = list(session.files)
+        zip_sessions.pop(user_id, None)
 
     refs = [
         MediaRef(file_id=f.file_id, filename=f.filename, size=f.size)
-        for f in session.files
+        for f in files
         if f.file_id
     ]
 
-    progress = await message.reply_text(
-        t(lang, "zip_packing", n=len(session.files))
-    )
+    progress: Message | None = None
     try:
+        progress = await message.reply_text(t(lang, "zip_packing", n=len(files)))
         limits, expire, failover = await user_limits(user)
-        prefer_free = failover in ("auth", "me_error")
+        prefer_free = failover == "auth"
 
         if custom_name:
             zip_name = safe_filename(custom_name)
@@ -1388,7 +1644,7 @@ async def finish_zip(
 
         zip_path = os.path.join(session.work_dir, zip_name)
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED) as zf:
-            for staged in session.files:
+            for staged in files:
                 zf.write(staged.path, arcname=staged.filename)
 
         zip_size = os.path.getsize(zip_path)
@@ -1422,7 +1678,7 @@ async def finish_zip(
             limits=limits,
             expire_seconds=expire,
             lang=lang,
-            count=len(session.files),
+            count=len(files),
             prefer_free=prefer_free,
         )
         token = await register_job(
@@ -1434,7 +1690,7 @@ async def finish_zip(
             url=result["url"],
             filename=zip_name,
             size=zip_size,
-            count=len(session.files),
+            count=len(files),
             token=token,
             user=user,
             expire_seconds=result.get("expire") or (
@@ -1452,18 +1708,39 @@ async def finish_zip(
             except Exception:
                 pass
     except dripfiles_mod.DripFilesError as exc:
-        await safe_edit(progress, t(lang, "err_drip", err=exc))
+        if progress:
+            await safe_edit(progress, t(lang, "err_drip", err=exc))
+        else:
+            await message.reply_text(t(lang, "err_drip", err=exc))
     except Exception as exc:
         log.exception("Error finalizando zip")
-        await safe_edit(progress, t(lang, "err_generic", err=exc))
+        if progress:
+            await safe_edit(progress, t(lang, "err_generic", err=exc))
+        else:
+            await message.reply_text(t(lang, "err_generic", err=exc))
     finally:
         rmtree_quiet(session.work_dir)
+        await release_transfer(user_id)
 
 
-async def clear_zip_session(user_id: int) -> None:
-    session = zip_sessions.pop(user_id, None)
-    if session:
-        rmtree_quiet(session.work_dir)
+async def clear_zip_session(
+    user_id: int, *, expect: ZipSession | None = None
+) -> ZipSession | None:
+    session = zip_sessions.get(user_id)
+    if not session:
+        return None
+    if expect is not None and session is not expect:
+        return None
+    async with session.lock:
+        if zip_sessions.get(user_id) is not session:
+            return None
+        if expect is not None and session is not expect:
+            return None
+        session.closed = True
+        session.busy = True
+        zip_sessions.pop(user_id, None)
+    rmtree_quiet(session.work_dir)
+    return session
 
 
 async def handle_single_file(message: Message) -> None:
@@ -1472,13 +1749,18 @@ async def handle_single_file(message: Message) -> None:
     user_id = message.from_user.id
     user = await database.get_user(user_id)
     lang = normalize_lang(user.lang)
-    work = user_work_dir(user_id, "single")
-    progress = await message.reply_text(
-        t(lang, "downloading", filename=name) + "…"
-    )
+    if not await acquire_transfer(user_id):
+        await message.reply_text(t(lang, "err_busy"))
+        return
+    work: str | None = None
+    progress: Message | None = None
     try:
+        work = user_work_dir(user_id, "single")
+        progress = await message.reply_text(
+            t(lang, "downloading", filename=name) + "…"
+        )
         limits, expire, failover = await user_limits(user)
-        prefer_free = failover in ("auth", "me_error")
+        prefer_free = failover == "auth"
         staged = await download_telegram_media(
             message,
             work,
@@ -1526,24 +1808,36 @@ async def handle_single_file(message: Message) -> None:
             failover=bool(result.get("_failover") or prefer_free),
         )
     except dripfiles_mod.DripFilesError as exc:
-        await safe_edit(progress, t(lang, "err_drip", err=exc))
+        if progress:
+            await safe_edit(progress, t(lang, "err_drip", err=exc))
+        else:
+            await message.reply_text(t(lang, "err_drip", err=exc))
     except Exception as exc:
         log.exception("Error con archivo suelto")
-        await safe_edit(progress, t(lang, "err_generic", err=exc))
+        if progress:
+            await safe_edit(progress, t(lang, "err_generic", err=exc))
+        else:
+            await message.reply_text(t(lang, "err_generic", err=exc))
     finally:
         rmtree_quiet(work)
+        await release_transfer(user_id)
 
 
 async def do_reupload(origin: Message, job: PendingJob) -> None:
-    work = user_work_dir(job.user_id, "reup")
     user = await database.get_user(job.user_id)
     lang = normalize_lang(user.lang)
-    progress = await origin.reply_text(
-        t(lang, "reup_start", name=job.output_name)
-    )
+    if not await acquire_transfer(job.user_id):
+        await origin.reply_text(t(lang, "err_busy"))
+        return
+    work: str | None = None
+    progress: Message | None = None
     try:
+        work = user_work_dir(job.user_id, "reup")
+        progress = await origin.reply_text(
+            t(lang, "reup_start", name=job.output_name)
+        )
         limits, expire, failover = await user_limits(user)
-        prefer_free = failover in ("auth", "me_error")
+        prefer_free = failover == "auth"
         staged_files: list[StagedFile] = []
         n = len(job.files)
         for i, ref in enumerate(job.files, start=1):
@@ -1638,27 +1932,43 @@ async def do_reupload(origin: Message, job: PendingJob) -> None:
         )
         await database.touch_job(job.token)
     except dripfiles_mod.DripFilesError as exc:
-        await safe_edit(progress, t(lang, "err_drip", err=exc))
+        if progress:
+            await safe_edit(progress, t(lang, "err_drip", err=exc))
+        else:
+            await origin.reply_text(t(lang, "err_drip", err=exc))
     except Exception as exc:
         log.exception("Error en resubida %s", job.token)
-        await safe_edit(progress, t(lang, "err_reup", err=exc))
+        if progress:
+            await safe_edit(progress, t(lang, "err_reup", err=exc))
+        else:
+            await origin.reply_text(t(lang, "err_reup", err=exc))
     finally:
         rmtree_quiet(work)
+        await release_transfer(job.user_id)
 
 
 async def zip_janitor() -> None:
     while True:
         await asyncio.sleep(60)
         expired = [
-            uid
+            (uid, s)
             for uid, s in list(zip_sessions.items())
-            if s.expired() and not s.busy
+            if s.expired() and not s.busy and not s.closed
         ]
-        for uid in expired:
-            session = zip_sessions.get(uid)
+        for uid, session in expired:
             lang = await lang_of(uid)
-            await clear_zip_session(uid)
-            if session and session.status_msg:
+            current = zip_sessions.get(uid)
+            if (
+                current is not session
+                or session.busy
+                or session.closed
+                or not session.expired()
+            ):
+                continue
+            cleared = await clear_zip_session(uid, expect=session)
+            if not cleared:
+                continue
+            if session.status_msg:
                 try:
                     await session.status_msg.edit_text(
                         t(lang, "zip_expired_idle", m=cfg.zip_timeout_minutes)
@@ -1676,7 +1986,10 @@ async def main() -> None:
     global http, database
     os.makedirs(cfg.download_dir, exist_ok=True)
 
-    database = Database(cfg.database_path)
+    database = Database(
+        cfg.database_path,
+        max_jobs_per_user=cfg.pending_jobs_per_user,
+    )
     await database.connect()
 
     timeout = aiohttp.ClientTimeout(total=None, sock_connect=60, sock_read=600)
@@ -1686,6 +1999,13 @@ async def main() -> None:
         log.info("Whitelist: %s user(s)", len(cfg.allowed_users))
     else:
         log.info("Public bot (ALLOWED_USER_IDS empty)")
+    log.info(
+        "Límites: %s/user, %s global, disco mín. %s, jobs/user %s",
+        cfg.max_concurrent_per_user,
+        cfg.max_concurrent_global,
+        human_size(cfg.min_free_disk_bytes) if cfg.min_free_disk_bytes else "off",
+        cfg.pending_jobs_per_user,
+    )
     if cfg.dripfiles_api_key:
         log.info(
             "DripFiles bot key: set (uploads auth by default); "

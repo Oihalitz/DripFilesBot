@@ -180,14 +180,14 @@ Create a personal key in your [DripFiles account](https://dripfiles.com). The bo
 After a successful upload you get a copy-friendly block, e.g.:
 
 ```text
-wget --output-document='report.pdf' 'https://dripfiles.com/AbCd1234'
+wget -O report.pdf https://dripfiles.com/AbCd1234
 ```
 
 ```text
-curl -L -o 'report.pdf' 'https://dripfiles.com/AbCd1234'
+curl -L -o report.pdf https://dripfiles.com/AbCd1234
 ```
 
-Long form for wget avoids `-O` looking like `-0` in some fonts. Tap-to-copy works well on mobile Telegram.
+Filenames are sanitized (no spaces) so Telegram mobile does not split the line when you copy it.
 
 ---
 
@@ -223,6 +223,10 @@ cp .env.example .env
 | `DATABASE_PATH` | no | SQLite path (default `downloads/dripfiles_bot.db`) |
 | `DRIPFILES_MESSAGE` | no | Description on DripFiles page (`{filename}`, `{size}`, `{count}`). Default: `{filename}` only |
 | `ZIP_TIMEOUT_MINUTES` | no | Idle zip timeout (default `30`) |
+| `MAX_CONCURRENT_PER_USER` | no | In-flight transfers per user (default `2`) |
+| `MAX_CONCURRENT_GLOBAL` | no | In-flight transfers for the whole bot (default `8`) |
+| `MIN_FREE_DISK_GB` | no | Refuse new downloads below this free space (default `2`; `0` = off) |
+| `PENDING_JOBS_PER_USER` | no | Re-upload jobs kept per user (default `20`) |
 | `LOG_LEVEL` | no | `DEBUG` · `INFO` · `WARNING` · `ERROR` |
 
 ### 2. Run locally
@@ -253,6 +257,8 @@ ALLOWED_USER_IDS=123456789,987654321
 ```
 
 Leave empty for a fully open bot.
+
+A public bot caps concurrent transfers (per user and globally), refuses downloads when disk is low, and keeps a per-user limit on re-upload jobs so one person cannot evict everyone else's **Re-upload** buttons.
 
 ---
 

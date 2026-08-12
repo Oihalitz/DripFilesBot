@@ -46,8 +46,9 @@ class PendingJob:
 
 
 class Database:
-    def __init__(self, path: str):
+    def __init__(self, path: str, *, max_jobs_per_user: int = 20):
         self.path = path
+        self.max_jobs_per_user = max(1, max_jobs_per_user)
         self._db: aiosqlite.Connection | None = None
 
     async def connect(self) -> None:
@@ -217,6 +218,7 @@ class Database:
         )
         await self.db.commit()
         await self.prune_jobs()
+        await self._prune_user_jobs(job.user_id)
 
     async def get_job(self, token: str) -> PendingJob | None:
         async with self.db.execute(
@@ -265,6 +267,29 @@ class Database:
                 """,
                 (overflow,),
             )
+        await self.db.commit()
+
+    async def _prune_user_jobs(self, user_id: int) -> None:
+        cap = self.max_jobs_per_user
+        async with self.db.execute(
+            "SELECT COUNT(*) AS c FROM pending_jobs WHERE user_id = ?",
+            (user_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            count = int(row["c"] if row else 0)
+        if count <= cap:
+            return
+        overflow = count - cap
+        await self.db.execute(
+            """
+            DELETE FROM pending_jobs WHERE token IN (
+                SELECT token FROM pending_jobs
+                WHERE user_id = ?
+                ORDER BY created_at ASC LIMIT ?
+            )
+            """,
+            (user_id, overflow),
+        )
         await self.db.commit()
 
     def _row_to_job(self, row: aiosqlite.Row) -> PendingJob | None:

@@ -23,6 +23,7 @@ import asyncio
 import logging
 import os
 import re
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Callable
@@ -41,8 +42,11 @@ FREE_EXPIRE_SECONDS = 2 * 24 * 3600
 FREE_MAX_FILES = 50
 # tope práctico por Telegram Premium (bots vía MTProto)
 TELEGRAM_MAX_SIZE = 4 * 1024**3
-READY_POLL_ATTEMPTS = 60
+READY_POLL_TIMEOUT = 600.0
 READY_POLL_DELAY = 0.75
+READY_POLL_DELAY_MAX = 5.0
+HTTP_RETRIES = 5
+RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 # alias histórico
 MAX_SIZE = FREE_MAX_SIZE
@@ -72,6 +76,67 @@ class AccountLimits:
     @property
     def is_free(self) -> bool:
         return self.tier == "free" or not self.tier
+
+
+def coerce_positive_int(value: object) -> int | None:
+    """Acepta int/float/str numérico; None si no es un entero > 0."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        n = int(value)
+        return n if n > 0 else None
+    if isinstance(value, str):
+        s = value.strip()
+        if s.isdigit():
+            n = int(s)
+            return n if n > 0 else None
+    return None
+
+
+def _retry_delay(resp: aiohttp.ClientResponse | None, attempt: int) -> float:
+    if resp is not None:
+        raw = resp.headers.get("Retry-After")
+        if raw:
+            try:
+                return min(max(float(raw.strip()), 0.2), 60.0)
+            except ValueError:
+                pass
+    return min(0.75 * (2**attempt), 20.0)
+
+
+async def _transient_sleep(
+    resp: aiohttp.ClientResponse | None, attempt: int
+) -> None:
+    delay = _retry_delay(resp, attempt)
+    log.info("DripFiles retry in %.1fs (attempt %s)", delay, attempt + 1)
+    await asyncio.sleep(delay)
+
+
+async def _request_json(
+    session: aiohttp.ClientSession,
+    method: str,
+    url: str,
+    *,
+    retries: int = HTTP_RETRIES,
+    **kwargs,
+) -> tuple[int, dict]:
+    last_exc: Exception | None = None
+    for attempt in range(retries):
+        try:
+            async with session.request(method, url, **kwargs) as resp:
+                if resp.status in RETRY_STATUSES and attempt + 1 < retries:
+                    await _transient_sleep(resp, attempt)
+                    continue
+                data = await _read_json(resp)
+                return resp.status, data
+        except DripFilesError:
+            raise
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            last_exc = exc
+            if attempt + 1 >= retries:
+                raise DripFilesError(f"error de red: {exc}") from exc
+            await _transient_sleep(None, attempt)
+    raise DripFilesError("error de red agotando reintentos") from last_exc
 
 
 def _api_message(data: dict | None, fallback: str) -> str:
@@ -232,17 +297,18 @@ async def get_account(
 ) -> AccountLimits:
     """Valida la API key y devuelve límites del plan (GET /api/v1/me)."""
     headers = _auth_headers(api_key)
-    async with session.get(f"{AUTH_BASE}/me", headers=headers) as resp:
-        data = await _read_json(resp)
-        if _is_auth_failure(resp.status, data):
-            raise DripFilesAuthError(
-                "API key inválida o sin permiso. Crea una en https://dripfiles.com"
-            )
-        if resp.status >= 400 or data.get("ok") is False:
-            raise DripFilesError(
-                _api_message(data, f"no se pudo leer la cuenta (HTTP {resp.status})")
-            )
-        return _parse_limits(data, fallback_free=False)
+    status, data = await _request_json(
+        session, "GET", f"{AUTH_BASE}/me", headers=headers
+    )
+    if _is_auth_failure(status, data):
+        raise DripFilesAuthError(
+            "API key inválida o sin permiso. Crea una en https://dripfiles.com"
+        )
+    if status >= 400 or data.get("ok") is False:
+        raise DripFilesError(
+            _api_message(data, f"no se pudo leer la cuenta (HTTP {status})")
+        )
+    return _parse_limits(data, fallback_free=False)
 
 
 async def resolve_limits(
@@ -295,18 +361,18 @@ async def create_upload(
 
     headers = _auth_headers(api_key)
     url = f"{_base(api_key)}/uploads"
-    async with session.post(url, json=body, headers=headers or None) as resp:
-        data = await _read_json(resp)
-        if _is_auth_failure(resp.status, data):
-            raise DripFilesAuthError(
-                _api_message(data, "API key inválida o sin permiso")
-            )
-        # 201 Created es éxito habitual
-        if resp.status >= 400 or data.get("ok") is False:
-            raise DripFilesError(
-                _api_message(data, f"no se pudo crear el envío (HTTP {resp.status})")
-            )
-        return _normalize_upload_meta(data, api_key=api_key)
+    status, data = await _request_json(
+        session, "POST", url, json=body, headers=headers or None
+    )
+    if _is_auth_failure(status, data):
+        raise DripFilesAuthError(
+            _api_message(data, "API key inválida o sin permiso")
+        )
+    if status >= 400 or data.get("ok") is False:
+        raise DripFilesError(
+            _api_message(data, f"no se pudo crear el envío (HTTP {status})")
+        )
+    return _normalize_upload_meta(data, api_key=api_key)
 
 
 async def _upload_chunk(
@@ -322,39 +388,55 @@ async def _upload_chunk(
     total: int,
 ) -> dict:
     end = start + len(chunk) - 1
-    form = aiohttp.FormData()
-    form.add_field("upload_id", upload_id)
-    form.add_field("file_uid", file_uid)
-    form.add_field("original_path", filename)
-    form.add_field(
-        "files[]",
-        chunk,
-        filename=filename,
-        content_type="application/octet-stream",
-    )
-    headers = _request_headers(
-        api_key,
-        upload_token,
-        **{
-            "X-File-Uid": file_uid,
-            "X-File-Name": quote(filename),
-            "Content-Range": f"bytes {start}-{end}/{total}",
-        },
-    )
     url = f"{_base(api_key)}/uploads/{upload_id}/files"
-    async with session.post(url, data=form, headers=headers) as resp:
-        data = await _read_json(resp)
-        if _is_auth_failure(resp.status, data):
-            raise DripFilesAuthError(
-                _api_message(data, "API key inválida durante la subida")
-            )
-        if resp.status >= 400 or data.get("ok") is False:
-            raise DripFilesError(
-                _api_message(
-                    data, f"error subiendo trozo {start}-{end} (HTTP {resp.status})"
-                )
-            )
-        return data
+    extra = {
+        "X-File-Uid": file_uid,
+        "X-File-Name": quote(filename),
+        "Content-Range": f"bytes {start}-{end}/{total}",
+    }
+    last_exc: Exception | None = None
+    for attempt in range(HTTP_RETRIES):
+        form = aiohttp.FormData()
+        form.add_field("upload_id", upload_id)
+        form.add_field("file_uid", file_uid)
+        form.add_field("original_path", filename)
+        form.add_field(
+            "files[]",
+            chunk,
+            filename=filename,
+            content_type="application/octet-stream",
+        )
+        headers = _request_headers(api_key, upload_token, **extra)
+        try:
+            async with session.post(url, data=form, headers=headers) as resp:
+                if resp.status in RETRY_STATUSES and attempt + 1 < HTTP_RETRIES:
+                    await _transient_sleep(resp, attempt)
+                    continue
+                data = await _read_json(resp)
+                if _is_auth_failure(resp.status, data):
+                    raise DripFilesAuthError(
+                        _api_message(data, "API key inválida durante la subida")
+                    )
+                if resp.status >= 400 or data.get("ok") is False:
+                    raise DripFilesError(
+                        _api_message(
+                            data,
+                            f"error subiendo trozo {start}-{end} (HTTP {resp.status})",
+                        )
+                    )
+                return data
+        except DripFilesError:
+            raise
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            last_exc = exc
+            if attempt + 1 >= HTTP_RETRIES:
+                raise DripFilesError(
+                    f"error de red subiendo trozo {start}-{end}: {exc}"
+                ) from exc
+            await _transient_sleep(None, attempt)
+    raise DripFilesError(
+        f"error de red subiendo trozo {start}-{end}"
+    ) from last_exc
 
 
 async def complete_upload(
@@ -369,21 +451,22 @@ async def complete_upload(
     body: dict = {}
     if message and message.strip():
         body["message"] = message.strip()
-    async with session.post(
+    status, data = await _request_json(
+        session,
+        "POST",
         f"{_base(api_key)}/uploads/{upload_id}/complete",
         json=body,
         headers=headers or None,
-    ) as resp:
-        data = await _read_json(resp)
-        if _is_auth_failure(resp.status, data):
-            raise DripFilesAuthError(
-                _api_message(data, "API key inválida al completar el envío")
-            )
-        if resp.status >= 400 or data.get("ok") is False:
-            raise DripFilesError(
-                _api_message(data, f"error al completar (HTTP {resp.status})")
-            )
-        return data
+    )
+    if _is_auth_failure(status, data):
+        raise DripFilesAuthError(
+            _api_message(data, "API key inválida al completar el envío")
+        )
+    if status >= 400 or data.get("ok") is False:
+        raise DripFilesError(
+            _api_message(data, f"error al completar (HTTP {status})")
+        )
+    return data
 
 
 async def get_status(
@@ -394,16 +477,17 @@ async def get_status(
     api_key: str | None = None,
 ) -> dict:
     headers = _request_headers(api_key, upload_token)
-    async with session.get(
+    status, data = await _request_json(
+        session,
+        "GET",
         f"{_base(api_key)}/uploads/{upload_id}",
         headers=headers or None,
-    ) as resp:
-        data = await _read_json(resp)
-        if resp.status >= 400 or data.get("ok") is False:
-            raise DripFilesError(
-                _api_message(data, f"error consultando estado (HTTP {resp.status})")
-            )
-        return data
+    )
+    if status >= 400 or data.get("ok") is False:
+        raise DripFilesError(
+            _api_message(data, f"error consultando estado (HTTP {status})")
+        )
+    return data
 
 
 async def wait_ready(
@@ -412,11 +496,13 @@ async def wait_ready(
     upload_token: str | None,
     *,
     api_key: str | None = None,
-    attempts: int = READY_POLL_ATTEMPTS,
+    timeout: float = READY_POLL_TIMEOUT,
     delay: float = READY_POLL_DELAY,
 ) -> dict:
     last: dict | None = None
-    for _ in range(attempts):
+    deadline = time.monotonic() + timeout
+    current = delay
+    while time.monotonic() < deadline:
         last = await get_status(
             session, upload_id, upload_token, api_key=api_key
         )
@@ -427,7 +513,8 @@ async def wait_ready(
             raise DripFilesError(
                 _api_message(last, f"el envío quedó en estado {status}")
             )
-        await asyncio.sleep(delay)
+        await asyncio.sleep(current)
+        current = min(current * 1.4, READY_POLL_DELAY_MAX)
     raise DripFilesError(
         _api_message(last, "timeout esperando a que DripFiles finalice el envío")
     )
@@ -514,8 +601,9 @@ async def upload_path(
     # propagar caducidad si la API la da en create o status
     if "expires_at" not in status and meta.get("expires_at"):
         status["expires_at"] = meta["expires_at"]
-    if "expire" not in status and meta.get("expire"):
-        status["expire"] = meta["expire"]
+    expire = coerce_positive_int(status.get("expire") or meta.get("expire"))
+    if expire is not None:
+        status["expire"] = expire
     log.info("DripFiles listo: %s", url)
     return status
 

@@ -26,6 +26,13 @@ class Config:
     dripfiles_message: str
     # minutos sin actividad antes de cancelar una sesión /zip
     zip_timeout_minutes: int
+    # tope de transferencias simultáneas (bot público)
+    max_concurrent_per_user: int
+    max_concurrent_global: int
+    # 0 = no comprobar. Si el disco libre baja de esto, se rechazan descargas.
+    min_free_disk_bytes: int
+    # jobs de resubida por usuario (el global 2000 sigue en db.py)
+    pending_jobs_per_user: int
 
 
 def _env(name: str) -> str | None:
@@ -38,6 +45,19 @@ def _env_bool(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.lower() in ("1", "true", "yes", "on", "y", "si", "sí")
+
+
+def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
+    raw = _env(name)
+    if raw is None:
+        return default
+    try:
+        n = int(raw)
+    except ValueError:
+        return default
+    if minimum is not None and n < minimum:
+        return default
+    return n
 
 
 def load_config() -> Config:
@@ -77,4 +97,8 @@ def load_config() -> Config:
         # Solo el nombre: el tamaño ya se ve en la página de DripFiles
         dripfiles_message=_env("DRIPFILES_MESSAGE") or "{filename}",
         zip_timeout_minutes=timeout,
+        max_concurrent_per_user=_env_int("MAX_CONCURRENT_PER_USER", 2, minimum=1),
+        max_concurrent_global=_env_int("MAX_CONCURRENT_GLOBAL", 8, minimum=1),
+        min_free_disk_bytes=_env_int("MIN_FREE_DISK_GB", 2, minimum=0) * 1024**3,
+        pending_jobs_per_user=_env_int("PENDING_JOBS_PER_USER", 20, minimum=1),
     )
