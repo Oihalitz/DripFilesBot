@@ -52,10 +52,12 @@ This repository is the open-source bot you can also self-host.
 - **Bring your own API key** — per-user key in SQLite; your DripFiles plan limits  
 - **API key failover** — invalid key → automatic retry on free (if size fits)  
 - **Zip mode** — pile files, pack once, share one link  
+- **Multi-file mode** — several separate files in one DripFiles link, without ZIP
 - **Re-upload button** — revive expired free links without re-sending the file  
 - **Dev mode** — copy-ready **`wget`** or **`curl`** after each upload  
 - **Multi-language** — Español · English · Português (`/lang` or first-start buttons)  
 - **Live progress** — Telegram download + DripFiles upload  
+- **Reverse download** — send a DripFiles link, select files, receive them in Telegram
 - **Open by default** — optional host whitelist (`ALLOWED_USER_IDS`)  
 - **Stack** — kurigram/pyrogram · aiohttp · aiosqlite  
 
@@ -94,6 +96,11 @@ This repository is the open-source bot you can also self-host.
 
 Re-upload jobs store Telegram `file_id`s in SQLite (not the file bytes) so the bot can re-fetch media later.
 
+Public DripFiles links also work in the other direction: one-file links are sent
+straight to Telegram; links with several files show a selectable checklist and a
+**Submit** button. When a link has more than `DRIPFILES_AUTO_ZIP_FILES` entries,
+the bot downloads all of them and sends one ZIP automatically.
+
 **Failover:** if a saved API key is rejected (401/403), the bot retries the free API when the file is within free limits, and tells the user to fix `/apikey`.
 
 ---
@@ -131,6 +138,7 @@ Create a personal key in your [DripFiles account](https://dripfiles.com). The bo
 |---|---|
 | `/start` · `/help` | Welcome, tips, quick-action buttons |
 | `/lang` | Language: ES / EN / PT |
+| `/multi` | Collect separate files into one DripFiles link (no ZIP) |
 | `/zip` | Start a multi-file session |
 | `/done` `[name.zip]` | Pack staged files and upload |
 | `/cancel` | Abort zip and wipe temp files |
@@ -165,6 +173,19 @@ Create a personal key in your [DripFiles account](https://dripfiles.com). The bo
 - Idle sessions expire after `ZIP_TIMEOUT_MINUTES` (default **30**).  
 - Total size respects your DripFiles limit (and the ~4 GB Telegram path).  
 - `/cancel` or ❌ deletes temporary files.
+
+## Multi-file link (without ZIP)
+
+```text
+/multi
+  → send file A
+  → send file B
+  → send file C
+/done optional-label
+```
+
+The result is one DripFiles URL containing all files separately. Recipients can
+preview or download each file individually; the bot does not compress them.
 
 ---
 
@@ -227,6 +248,7 @@ cp .env.example .env
 | `MAX_CONCURRENT_GLOBAL` | no | In-flight transfers for the whole bot (default `8`) |
 | `MIN_FREE_DISK_GB` | no | Refuse new downloads below this free space (default `2`; `0` = off) |
 | `PENDING_JOBS_PER_USER` | no | Re-upload jobs kept per user (default `20`) |
+| `DRIPFILES_AUTO_ZIP_FILES` | no | Auto-ZIP a public DripFiles link above this file count (default `10`) |
 | `LOG_LEVEL` | no | `DEBUG` · `INFO` · `WARNING` · `ERROR` |
 
 ### 2. Run locally

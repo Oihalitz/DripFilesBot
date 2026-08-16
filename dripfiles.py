@@ -26,8 +26,10 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
+from email.message import Message as EmailMessage
+from html.parser import HTMLParser
 from typing import Callable
-from urllib.parse import quote
+from urllib.parse import quote, urljoin, urlparse
 
 import aiohttp
 
@@ -47,6 +49,8 @@ READY_POLL_DELAY = 0.75
 READY_POLL_DELAY_MAX = 5.0
 HTTP_RETRIES = 5
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+PUBLIC_PAGE_MAX_BYTES = 5 * 1024 * 1024
+_PUBLIC_SLUG_RE = re.compile(r"^/[A-Za-z0-9_-]{4,64}/?$")
 
 # alias histórico
 MAX_SIZE = FREE_MAX_SIZE
@@ -58,6 +62,180 @@ class DripFilesError(Exception):
 
 class DripFilesAuthError(DripFilesError):
     """API key inválida, revocada o sin permiso (401/403)."""
+
+
+@dataclass(frozen=True)
+class PublicFile:
+    """Archivo descargable anunciado por un enlace público de DripFiles."""
+
+    name: str
+    size: int
+    url: str
+
+
+class _PublicFilesParser(HTMLParser):
+    """Extrae archivos de la página pública sin depender del tipo de preview."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.files: list[dict[str, object]] = []
+        self._current: dict[str, object] | None = None
+        self._file_depth = 0
+        self._capture_name = False
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        values = {str(k): str(v or "") for k, v in attrs}
+        classes = set(values.get("class", "").split())
+
+        if tag == "div":
+            if self._current is None and "file" in classes:
+                self._current = {}
+                self._file_depth = 1
+            elif self._current is not None:
+                self._file_depth += 1
+
+        if self._current is None:
+            return
+
+        # Todos los previews actuales usan data-<tipo>-download/name/size.
+        for key, value in values.items():
+            if key.startswith("data-") and key.endswith("-download") and value:
+                prefix = key[: -len("-download")]
+                self._current["url"] = value
+                name = values.get(prefix + "-name")
+                size = values.get(prefix + "-size")
+                if name:
+                    self._current["name"] = name
+                if size and size.isdigit():
+                    self._current["size"] = int(size)
+
+        if tag == "a" and "download" in classes and values.get("href"):
+            self._current["url"] = values["href"]
+        if tag == "span" and "name" in classes:
+            self._capture_name = True
+
+    def handle_data(self, data: str) -> None:
+        if self._current is not None and self._capture_name:
+            # Los previews modernos ya traen data-<tipo>-name; el <span>
+            # visible es solo el fallback para plantillas antiguas.
+            if self._current.get("name"):
+                return
+            name = data.strip()
+            if name:
+                self._current["name"] = name
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "span":
+            self._capture_name = False
+        if tag != "div" or self._current is None:
+            return
+        self._file_depth -= 1
+        if self._file_depth <= 0:
+            if self._current.get("url"):
+                self.files.append(self._current)
+            self._current = None
+            self._file_depth = 0
+
+
+def normalize_public_url(url: str) -> str:
+    """Valida y canoniza un enlace público (evita convertirlo en un SSRF)."""
+    raw = (url or "").strip().rstrip(".,;:!?)]}")
+    if raw.lower().startswith(("www.", "dripfiles.com/")):
+        raw = "https://" + raw
+    parsed = urlparse(raw)
+    if parsed.scheme not in ("http", "https"):
+        raise DripFilesError("el enlace de DripFiles no es válido")
+    if (parsed.hostname or "").lower() not in ("dripfiles.com", "www.dripfiles.com"):
+        raise DripFilesError("el enlace no pertenece a DripFiles")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise DripFilesError("el enlace público de DripFiles no es válido") from exc
+    if port not in (None, 80, 443) or not _PUBLIC_SLUG_RE.fullmatch(parsed.path):
+        raise DripFilesError("el enlace público de DripFiles no es válido")
+    return f"https://dripfiles.com/{parsed.path.strip('/')}"
+
+
+def _content_disposition_filename(value: str | None) -> str | None:
+    if not value:
+        return None
+    msg = EmailMessage()
+    msg["Content-Disposition"] = value
+    name = msg.get_filename()
+    return str(name).strip() if name else None
+
+
+def _public_download_url(source_url: str, candidate: str) -> str | None:
+    url = urljoin(source_url, candidate)
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or (parsed.hostname or "").lower() not in (
+        "dripfiles.com",
+        "www.dripfiles.com",
+    ):
+        return None
+    if parsed.path != "/handler/file":
+        return None
+    return url
+
+
+async def inspect_public_link(
+    session: aiohttp.ClientSession, url: str
+) -> tuple[str, list[PublicFile]]:
+    """Devuelve la URL canónica y los archivos visibles en un enlace público."""
+    source_url = normalize_public_url(url)
+    headers = {
+        "Accept": "text/html,application/octet-stream;q=0.9,*/*;q=0.8",
+        "User-Agent": "DripFilesBot/1.0 (+https://t.me/DripFilesBot)",
+    }
+    try:
+        async with session.get(source_url, headers=headers) as resp:
+            if resp.status in (404, 410):
+                raise DripFilesError("el enlace no existe o ha caducado")
+            if resp.status >= 400:
+                raise DripFilesError(f"no se pudo abrir el enlace (HTTP {resp.status})")
+
+            content_type = (resp.headers.get("Content-Type") or "").lower()
+            disposition = resp.headers.get("Content-Disposition")
+            if disposition or "text/html" not in content_type:
+                name = _content_disposition_filename(disposition) or "dripfiles_file"
+                size = coerce_positive_int(resp.headers.get("Content-Length")) or 0
+                return source_url, [PublicFile(name=name, size=size, url=source_url)]
+
+            declared = coerce_positive_int(resp.headers.get("Content-Length")) or 0
+            if declared > PUBLIC_PAGE_MAX_BYTES:
+                raise DripFilesError("la página del enlace es demasiado grande")
+            body = await resp.content.read(PUBLIC_PAGE_MAX_BYTES + 1)
+            if len(body) > PUBLIC_PAGE_MAX_BYTES:
+                raise DripFilesError("la página del enlace es demasiado grande")
+            html = body.decode(resp.charset or "utf-8", errors="replace")
+    except DripFilesError:
+        raise
+    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        raise DripFilesError(f"error de red abriendo el enlace: {exc}") from exc
+
+    parser = _PublicFilesParser()
+    parser.feed(html)
+    files: list[PublicFile] = []
+    seen: set[str] = set()
+    for item in parser.files:
+        download_url = _public_download_url(source_url, str(item.get("url") or ""))
+        if not download_url or download_url in seen:
+            continue
+        seen.add(download_url)
+        raw_size = item.get("size")
+        size = int(raw_size) if isinstance(raw_size, int) and raw_size > 0 else 0
+        files.append(
+            PublicFile(
+                name=str(item.get("name") or f"file_{len(files) + 1}"),
+                size=size,
+                url=download_url,
+            )
+        )
+    if not files:
+        raise DripFilesError(
+            "el enlace no contiene archivos descargables o requiere contraseña"
+        )
+    return source_url, files
 
 
 @dataclass(frozen=True)
@@ -351,6 +529,7 @@ async def create_upload(
     api_key: str | None = None,
     message: str | None = None,
     expire_seconds: int | None = None,
+    files: list[dict[str, object]] | None = None,
 ) -> dict:
     """Crea un envío. Con API key se puede pedir caducidad (`expire` en segundos)."""
     body: dict = {}
@@ -358,6 +537,8 @@ async def create_upload(
         body["message"] = message.strip()
     if api_key and expire_seconds and expire_seconds > 0:
         body["expire"] = int(expire_seconds)
+    if files:
+        body["files"] = files
 
     headers = _auth_headers(api_key)
     url = f"{_base(api_key)}/uploads"
@@ -533,64 +714,108 @@ async def upload_path(
     chunk_size: int | None = None,
 ) -> dict:
     """Sube un archivo local y devuelve el dict de estado listo (incluye `url`)."""
-    if not os.path.isfile(path):
-        raise DripFilesError(f"no existe el archivo: {path}")
-    total = os.path.getsize(path)
-    if total <= 0:
-        raise DripFilesError("el archivo está vacío")
+    name = filename or os.path.basename(path) or f"file_{uuid.uuid4().hex[:8]}"
+    return await upload_paths(
+        session,
+        [(path, name)],
+        api_key=api_key,
+        message=message,
+        expire_seconds=expire_seconds,
+        max_size=max_size,
+        max_files=1,
+        on_progress=on_progress,
+        chunk_size=chunk_size,
+    )
+
+
+async def upload_paths(
+    session: aiohttp.ClientSession,
+    paths: list[tuple[str, str]],
+    *,
+    api_key: str | None = None,
+    message: str | None = None,
+    expire_seconds: int | None = None,
+    max_size: int | None = None,
+    max_files: int | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
+    chunk_size: int | None = None,
+) -> dict:
+    """Sube varios archivos independientes dentro de un único enlace."""
+    if not paths:
+        raise DripFilesError("no hay archivos para subir")
+    if max_files and len(paths) > max_files:
+        raise DripFilesError(
+            f"supera el límite de archivos ({len(paths)}/{max_files})"
+        )
+
+    prepared: list[tuple[str, str, int]] = []
+    total = 0
+    for path, filename in paths:
+        if not os.path.isfile(path):
+            raise DripFilesError(f"no existe el archivo: {path}")
+        size = os.path.getsize(path)
+        if size <= 0:
+            raise DripFilesError(f"el archivo está vacío: {filename}")
+        name = filename or os.path.basename(path) or f"file_{uuid.uuid4().hex[:8]}"
+        prepared.append((path, name, size))
+        total += size
 
     limit = max_size or (FREE_MAX_SIZE if not api_key else TELEGRAM_MAX_SIZE)
     if total > limit:
         raise DripFilesError(
-            f"supera el límite de DripFiles ({_human(limit)}; archivo {_human(total)})"
+            f"supera el límite de DripFiles ({_human(limit)}; total {_human(total)})"
         )
 
-    name = filename or os.path.basename(path) or f"file_{uuid.uuid4().hex[:8]}"
     msg = message.strip() if message and message.strip() else None
     meta = await create_upload(
         session,
         api_key=api_key,
         message=msg,
         expire_seconds=expire_seconds,
+        files=[{"name": name, "size": size} for _, name, size in prepared],
     )
     upload_id = str(meta["upload_id"])
     token = meta.get("upload_token")  # None en API autenticada
     chunk = int(chunk_size or meta.get("chunk_size") or DEFAULT_CHUNK)
     if chunk < 64 * 1024:
         chunk = DEFAULT_CHUNK
-    file_uid = str(uuid.uuid4())
-
     log.info(
-        "DripFiles%s: subiendo %s (%s bytes) → %s",
+        "DripFiles%s: subiendo %s archivo(s) (%s bytes) → %s",
         " (auth)" if api_key else " (free)",
-        name,
+        len(prepared),
         total,
         upload_id,
     )
 
-    sent = 0
-    with open(path, "rb") as fh:
-        while sent < total:
-            data = fh.read(chunk)
-            if not data:
-                break
-            await _upload_chunk(
-                session,
-                api_key=api_key,
-                upload_id=upload_id,
-                upload_token=token,
-                file_uid=file_uid,
-                filename=name,
-                chunk=data,
-                start=sent,
-                total=total,
-            )
-            sent += len(data)
-            if on_progress:
-                try:
-                    on_progress(sent, total)
-                except Exception:
-                    log.debug("progress dripfiles falló", exc_info=True)
+    uploaded_total = 0
+    for path, name, file_total in prepared:
+        file_uid = str(uuid.uuid4())
+        file_sent = 0
+        with open(path, "rb") as fh:
+            while file_sent < file_total:
+                data = fh.read(chunk)
+                if not data:
+                    break
+                await _upload_chunk(
+                    session,
+                    api_key=api_key,
+                    upload_id=upload_id,
+                    upload_token=token,
+                    file_uid=file_uid,
+                    filename=name,
+                    chunk=data,
+                    start=file_sent,
+                    total=file_total,
+                )
+                file_sent += len(data)
+                if on_progress:
+                    try:
+                        on_progress(uploaded_total + file_sent, total)
+                    except Exception:
+                        log.debug("progress dripfiles falló", exc_info=True)
+        if file_sent != file_total:
+            raise DripFilesError(f"lectura incompleta del archivo: {name}")
+        uploaded_total += file_total
 
     await complete_upload(
         session, upload_id, token, api_key=api_key, message=msg

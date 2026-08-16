@@ -33,6 +33,8 @@ class Config:
     min_free_disk_bytes: int
     # jobs de resubida por usuario (el global 2000 sigue en db.py)
     pending_jobs_per_user: int
+    # Un enlace público con más archivos que este umbral se envía como ZIP.
+    dripfiles_auto_zip_files: int
 
 
 def _env(name: str) -> str | None:
@@ -101,4 +103,7 @@ def load_config() -> Config:
         max_concurrent_global=_env_int("MAX_CONCURRENT_GLOBAL", 8, minimum=1),
         min_free_disk_bytes=_env_int("MIN_FREE_DISK_GB", 2, minimum=0) * 1024**3,
         pending_jobs_per_user=_env_int("PENDING_JOBS_PER_USER", 20, minimum=1),
+        dripfiles_auto_zip_files=_env_int(
+            "DRIPFILES_AUTO_ZIP_FILES", 10, minimum=1
+        ),
     )

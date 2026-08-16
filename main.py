@@ -71,6 +71,8 @@ database: Database
 background_tasks: set[asyncio.Task] = set()
 zip_sessions: dict[int, "ZipSession"] = {}
 pending_first_file: dict[int, Message] = {}
+pending_first_link: dict[int, tuple[Message, str]] = {}
+drip_selections: dict[str, "DripSelection"] = {}
 _lang_prompted: set[int] = set()
 _STALE_SECONDS = 180
 _KNOWN_CMDS = frozenset(
@@ -84,11 +86,16 @@ _KNOWN_CMDS = frozenset(
         "expire",
         "dev",
         "zip",
+        "multi",
         "cancel",
         "done",
     }
 )
 _URL_RE = re.compile(r"(?i)^(https?://\S+|www\.\S+\.\S+)")
+_DRIPFILES_URL_RE = re.compile(
+    r"(?i)(?<![\w.-])(?:(?:https?://)?(?:www\.)?)"
+    r"dripfiles\.com/[A-Za-z0-9_-]{4,64}(?:[/?#][^\s]*)?"
+)
 _SLOT_WAIT_SECONDS = 3600
 _slot_cond = asyncio.Condition()
 _user_inflight: dict[int, int] = {}
@@ -96,6 +103,7 @@ _global_inflight = 0
 
 ZIP_SESSION_TIMEOUT = cfg.zip_timeout_minutes * 60
 _SAFE_NAME_RE = re.compile(r"[^\w.\- ()\[\]]+", re.UNICODE)
+_DRIP_SELECTION_PAGE_SIZE = 8
 
 
 @dataclass
@@ -110,12 +118,14 @@ class StagedFile:
 class ZipSession:
     user_id: int
     work_dir: str
+    mode: str = "zip"  # zip | multi
     files: list[StagedFile] = field(default_factory=list)
     created_at: float = field(default_factory=time.monotonic)
     last_activity: float = field(default_factory=time.monotonic)
     status_msg: Message | None = None
     busy: bool = False
     closed: bool = False
+    pending: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     @property
@@ -124,6 +134,25 @@ class ZipSession:
 
     def touch(self) -> None:
         self.last_activity = time.monotonic()
+
+    def expired(self) -> bool:
+        return (time.monotonic() - self.last_activity) > ZIP_SESSION_TIMEOUT
+
+
+@dataclass
+class DripSelection:
+    token: str
+    user_id: int
+    source_url: str
+    files: list[dripfiles_mod.PublicFile]
+    origin: Message
+    prompt: Message | None = None
+    selected: set[int] = field(default_factory=set)
+    page: int = 0
+    created_at: float = field(default_factory=time.monotonic)
+    last_activity: float = field(default_factory=time.monotonic)
+    busy: bool = False
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def expired(self) -> bool:
         return (time.monotonic() - self.last_activity) > ZIP_SESSION_TIMEOUT
@@ -225,6 +254,11 @@ def safe_filename(name: str | None, fallback: str = "file") -> str:
     return base[:200]
 
 
+def extract_dripfiles_url(text: str) -> str | None:
+    match = _DRIPFILES_URL_RE.search(text or "")
+    return match.group(0).rstrip(".,;:!?)]}") if match else None
+
+
 async def safe_edit(message: Message, text: str, **kwargs) -> None:
     try:
         await message.edit_text(text, **kwargs)
@@ -277,7 +311,12 @@ def display_api_key(user: UserSettings, lang: str) -> str:
 
 def help_text(lang: str) -> str:
     api_note = t(lang, "help_api_own_ok") if cfg.allow_user_api_keys else ""
-    return t(lang, "help", api_note=api_note)
+    return t(
+        lang,
+        "help",
+        api_note=api_note,
+        auto_zip=cfg.dripfiles_auto_zip_files,
+    )
 
 
 def lang_keyboard() -> InlineKeyboardMarkup:
@@ -297,7 +336,10 @@ def help_keyboard(lang: str) -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(
                     t(lang, "btn_zip_start"), callback_data="zip:start"
-                )
+                ),
+                InlineKeyboardButton(
+                    t(lang, "btn_multi_start"), callback_data="multi:start"
+                ),
             ],
             [
                 InlineKeyboardButton(
@@ -332,15 +374,17 @@ def settings_keyboard(lang: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def zip_keyboard(lang: str) -> InlineKeyboardMarkup:
+def zip_keyboard(lang: str, mode: str = "zip") -> InlineKeyboardMarkup:
+    prefix = "multi" if mode == "multi" else "zip"
+    done_key = "btn_multi_done" if mode == "multi" else "btn_zip_done"
     return InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
-                    t(lang, "btn_zip_done"), callback_data="zip:done"
+                    t(lang, done_key), callback_data=f"{prefix}:done"
                 ),
                 InlineKeyboardButton(
-                    t(lang, "btn_zip_cancel"), callback_data="zip:cancel"
+                    t(lang, "btn_zip_cancel"), callback_data=f"{prefix}:cancel"
                 ),
             ]
         ]
@@ -372,6 +416,85 @@ def dev_keyboard(lang: str) -> InlineKeyboardMarkup:
             ]
         ]
     )
+
+
+def drip_selection_text(session: DripSelection, lang: str) -> str:
+    return t(
+        lang,
+        "drip_pick",
+        count=len(session.files),
+        selected=len(session.selected),
+    )
+
+
+def drip_selection_keyboard(
+    session: DripSelection, lang: str
+) -> InlineKeyboardMarkup:
+    page_count = max(
+        1,
+        (len(session.files) + _DRIP_SELECTION_PAGE_SIZE - 1)
+        // _DRIP_SELECTION_PAGE_SIZE,
+    )
+    session.page = min(max(session.page, 0), page_count - 1)
+    start = session.page * _DRIP_SELECTION_PAGE_SIZE
+    end = min(start + _DRIP_SELECTION_PAGE_SIZE, len(session.files))
+    rows: list[list[InlineKeyboardButton]] = []
+    for index in range(start, end):
+        item = session.files[index]
+        mark = "✅" if index in session.selected else "⬜"
+        label = item.name
+        if len(label) > 38:
+            label = label[:35] + "…"
+        if item.size:
+            label += f" · {human_size(item.size)}"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"{mark} {label}",
+                    callback_data=f"df:t:{session.token}:{index}",
+                )
+            ]
+        )
+    if page_count > 1:
+        nav: list[InlineKeyboardButton] = []
+        if session.page > 0:
+            nav.append(
+                InlineKeyboardButton(
+                    "◀️", callback_data=f"df:p:{session.token}:{session.page - 1}"
+                )
+            )
+        nav.append(
+            InlineKeyboardButton(
+                f"{session.page + 1}/{page_count}",
+                callback_data=f"df:p:{session.token}:{session.page}",
+            )
+        )
+        if session.page + 1 < page_count:
+            nav.append(
+                InlineKeyboardButton(
+                    "▶️", callback_data=f"df:p:{session.token}:{session.page + 1}"
+                )
+            )
+        rows.append(nav)
+    rows.append(
+        [
+            InlineKeyboardButton(
+                t(lang, "btn_select_all"), callback_data=f"df:a:{session.token}"
+            ),
+            InlineKeyboardButton(
+                t(lang, "btn_select_none"), callback_data=f"df:n:{session.token}"
+            ),
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                t(lang, "btn_submit_files", n=len(session.selected)),
+                callback_data=f"df:s:{session.token}",
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(rows)
 
 
 def media_filter(_, __, message: Message) -> bool:
@@ -693,6 +816,284 @@ async def download_telegram_media(
     )
 
 
+async def download_public_file(
+    item: dripfiles_mod.PublicFile,
+    dest_dir: str,
+    *,
+    max_size: int,
+    progress: Message,
+    lang: str,
+    position: int,
+    count: int,
+) -> StagedFile:
+    if item.size and item.size > max_size:
+        raise dripfiles_mod.DripFilesError(
+            t(
+                lang,
+                "err_file_too_big",
+                size=human_size(item.size),
+                limit=human_size(max_size),
+            )
+        )
+    disk_check_step = 64 * 1024**2
+    ensure_disk(lang, item.size or disk_check_step)
+    filename = safe_filename(item.name, f"file_{position}")
+    dest = os.path.join(dest_dir, filename)
+    if os.path.exists(dest):
+        stem, suffix = Path(filename).stem, Path(filename).suffix
+        filename = f"{stem}_{uuid.uuid4().hex[:6]}{suffix}"
+        dest = os.path.join(dest_dir, filename)
+
+    last_edit = 0.0
+    headers = {"User-Agent": "DripFilesBot/1.0 (+https://t.me/DripFilesBot)"}
+    try:
+        async with http.get(item.url, headers=headers) as resp:
+            if resp.status in (404, 410):
+                raise dripfiles_mod.DripFilesError(
+                    t(lang, "drip_link_expired")
+                )
+            if resp.status >= 400:
+                raise dripfiles_mod.DripFilesError(
+                    f"HTTP {resp.status} descargando {filename}"
+                )
+            content_type = (resp.headers.get("Content-Type") or "").lower()
+            disposition = resp.headers.get("Content-Disposition") or ""
+            if "text/html" in content_type and "attachment" not in disposition.lower():
+                raise dripfiles_mod.DripFilesError(
+                    t(lang, "drip_link_expired")
+                )
+            header_size = dripfiles_mod.coerce_positive_int(
+                resp.headers.get("Content-Length")
+            )
+            total = header_size or item.size or 0
+            if total and total > max_size:
+                raise dripfiles_mod.DripFilesError(
+                    t(
+                        lang,
+                        "err_file_too_big",
+                        size=human_size(total),
+                        limit=human_size(max_size),
+                    )
+                )
+            written = 0
+            next_disk_check = disk_check_step
+            with open(dest, "wb") as fh:
+                async for chunk in resp.content.iter_chunked(1024 * 1024):
+                    written += len(chunk)
+                    if written > max_size:
+                        raise dripfiles_mod.DripFilesError(
+                            t(
+                                lang,
+                                "err_file_too_big",
+                                size=human_size(written),
+                                limit=human_size(max_size),
+                            )
+                        )
+                    if not item.size and written >= next_disk_check:
+                        ensure_disk(lang, disk_check_step)
+                        next_disk_check = written + disk_check_step
+                    fh.write(chunk)
+                    now = time.monotonic()
+                    if now - last_edit < 2.5 and (not total or written < total):
+                        continue
+                    last_edit = now
+                    pct_text = ""
+                    if total:
+                        pct = min(99.0, written * 100 / total)
+                        pct_text = (
+                            f"\n`[{progress_bar(pct)}]` {pct:.1f}% "
+                            f"({human_size(written)}/{human_size(total)})"
+                        )
+                    await safe_edit(
+                        progress,
+                        t(
+                            lang,
+                            "drip_downloading",
+                            i=position,
+                            n=count,
+                            filename=filename,
+                        )
+                        + pct_text,
+                    )
+    except dripfiles_mod.DripFilesError:
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
+        raise
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
+        raise dripfiles_mod.DripFilesError(
+            f"error descargando {filename}: {exc}"
+        ) from exc
+
+    if not os.path.isfile(dest) or os.path.getsize(dest) <= 0:
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
+        raise dripfiles_mod.DripFilesError(t(lang, "err_empty"))
+    return StagedFile(
+        path=dest,
+        filename=filename,
+        size=os.path.getsize(dest),
+    )
+
+
+async def send_public_document(
+    origin: Message,
+    staged: StagedFile,
+    progress: Message,
+    lang: str,
+) -> None:
+    last_edit = 0.0
+
+    async def on_progress(current: int, total: int) -> None:
+        nonlocal last_edit
+        now = time.monotonic()
+        if now - last_edit < 2.5 and current < total:
+            return
+        last_edit = now
+        pct = min(99.0, current * 100 / total) if total else 0.0
+        detail = (
+            f"\n`[{progress_bar(pct)}]` {pct:.1f}% "
+            f"({human_size(current)}/{human_size(total)})"
+            if total
+            else f"\n{human_size(current)}"
+        )
+        await safe_edit(
+            progress,
+            t(lang, "drip_sending", filename=staged.filename) + detail,
+        )
+
+    for attempt in range(6):
+        try:
+            await app.send_document(
+                chat_id=origin.chat.id,
+                document=staged.path,
+                reply_to_message_id=origin.id,
+                progress=on_progress,
+            )
+            return
+        except FloodWait as exc:
+            if attempt == 5:
+                raise
+            wait = int(getattr(exc, "value", None) or getattr(exc, "x", 1) or 1)
+            await asyncio.sleep(min(max(wait, 1), 180))
+
+
+async def deliver_public_files(
+    origin: Message,
+    files: list[dripfiles_mod.PublicFile],
+    *,
+    source_url: str,
+    as_zip: bool,
+    progress: Message | None = None,
+) -> None:
+    user_id = origin.from_user.id
+    lang = await lang_of(user_id)
+    if not await acquire_transfer(user_id):
+        await origin.reply_text(t(lang, "err_busy"))
+        return
+
+    work: str | None = None
+    status = progress
+    try:
+        work = user_work_dir(user_id, "drip_download")
+        if status is None:
+            status = await origin.reply_text(t(lang, "drip_preparing"))
+        total_known = sum(item.size for item in files if item.size > 0)
+        if as_zip and total_known > dripfiles_mod.TELEGRAM_MAX_SIZE:
+            raise dripfiles_mod.DripFilesError(
+                t(
+                    lang,
+                    "drip_total_too_big",
+                    size=human_size(total_known),
+                    limit=human_size(dripfiles_mod.TELEGRAM_MAX_SIZE),
+                )
+            )
+
+        if not as_zip:
+            for index, item in enumerate(files, start=1):
+                staged = await download_public_file(
+                    item,
+                    work,
+                    max_size=dripfiles_mod.TELEGRAM_MAX_SIZE,
+                    progress=status,
+                    lang=lang,
+                    position=index,
+                    count=len(files),
+                )
+                await safe_edit(
+                    status, t(lang, "drip_sending", filename=staged.filename)
+                )
+                await send_public_document(origin, staged, status, lang)
+                try:
+                    os.remove(staged.path)
+                except OSError:
+                    pass
+            await safe_edit(status, t(lang, "drip_sent", n=len(files)))
+            return
+
+        staged_files: list[StagedFile] = []
+        for index, item in enumerate(files, start=1):
+            remaining = dripfiles_mod.TELEGRAM_MAX_SIZE - sum(
+                f.size for f in staged_files
+            )
+            staged = await download_public_file(
+                item,
+                work,
+                max_size=remaining,
+                progress=status,
+                lang=lang,
+                position=index,
+                count=len(files),
+            )
+            staged_files.append(staged)
+
+        ensure_disk(lang, sum(f.size for f in staged_files))
+        slug = dripfiles_mod.normalize_public_url(source_url).rstrip("/").rsplit(
+            "/", 1
+        )[-1]
+        zip_name = f"dripfiles_{slug}.zip"
+        zip_path = os.path.join(work, zip_name)
+        await safe_edit(status, t(lang, "drip_packing", n=len(staged_files)))
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED) as zf:
+            for staged in staged_files:
+                zf.write(staged.path, arcname=staged.filename)
+        zip_size = os.path.getsize(zip_path)
+        if zip_size > dripfiles_mod.TELEGRAM_MAX_SIZE:
+            raise dripfiles_mod.DripFilesError(
+                t(
+                    lang,
+                    "drip_total_too_big",
+                    size=human_size(zip_size),
+                    limit=human_size(dripfiles_mod.TELEGRAM_MAX_SIZE),
+                )
+            )
+        outgoing = StagedFile(path=zip_path, filename=zip_name, size=zip_size)
+        await safe_edit(status, t(lang, "drip_sending", filename=outgoing.filename))
+        await send_public_document(origin, outgoing, status, lang)
+        await safe_edit(status, t(lang, "drip_sent", n=1))
+    except dripfiles_mod.DripFilesError as exc:
+        if status:
+            await safe_edit(status, t(lang, "err_drip_download", err=exc))
+        else:
+            await origin.reply_text(t(lang, "err_drip_download", err=exc))
+    except Exception as exc:
+        log.exception("Error entregando enlace DripFiles")
+        if status:
+            await safe_edit(status, t(lang, "err_drip_download", err=exc))
+        else:
+            await origin.reply_text(t(lang, "err_drip_download", err=exc))
+    finally:
+        rmtree_quiet(work)
+        await release_transfer(user_id)
+
+
 async def upload_to_dripfiles(
     path: str,
     filename: str,
@@ -800,6 +1201,103 @@ async def upload_to_dripfiles(
         return await _upload_free(reason="auth")
 
 
+async def upload_many_to_dripfiles(
+    files: list[StagedFile],
+    display_name: str,
+    progress: Message,
+    *,
+    user: UserSettings,
+    limits: dripfiles_mod.AccountLimits,
+    expire_seconds: int | None,
+    lang: str,
+    prefer_free: bool = False,
+) -> dict:
+    """Sube varios archivos como una sola transferencia, sin comprimirlos."""
+    total_size = sum(f.size for f in files)
+    count = len(files)
+    last_edit = [0.0]
+    api_key = effective_api_key(user)
+
+    def on_progress(uploaded: int, total: int) -> None:
+        now = time.monotonic()
+        if now - last_edit[0] < 3 and uploaded < total:
+            return
+        last_edit[0] = now
+        head = t(lang, "multi_uploading", n=count)
+        if total:
+            pct = min(99.0, uploaded * 100 / total)
+            text = (
+                f"{head}\n"
+                f"`[{progress_bar(pct)}]` {pct:.1f}% "
+                f"({human_size(uploaded)}/{human_size(total)})"
+            )
+        else:
+            text = f"{head}\n{human_size(uploaded)}"
+        spawn(safe_edit(progress, text))
+
+    await safe_edit(progress, t(lang, "multi_uploading_prep", n=count))
+    msg = drip_message_for(display_name, total_size, count=count)
+    paths = [(f.path, f.filename) for f in files]
+
+    async def _do(
+        *,
+        api_key: str | None,
+        expire: int | None,
+        active_limits: dripfiles_mod.AccountLimits,
+    ) -> dict:
+        result = await dripfiles_mod.upload_paths(
+            http,
+            paths,
+            api_key=api_key,
+            message=msg,
+            expire_seconds=expire,
+            max_size=active_limits.max_size_bytes,
+            max_files=active_limits.max_files,
+            on_progress=on_progress,
+            chunk_size=active_limits.chunk_size,
+        )
+        if not result.get("url"):
+            raise dripfiles_mod.DripFilesError("DripFiles returned no URL")
+        return result
+
+    async def _upload_free(*, reason: str | None) -> dict:
+        free = await free_limits_capped()
+        if total_size > free.max_size_bytes:
+            raise dripfiles_mod.DripFilesError(
+                failover_text(
+                    lang, user, "too_big", limit=human_size(free.max_size_bytes)
+                )
+            )
+        if count > free.max_files:
+            raise dripfiles_mod.DripFilesError(
+                t(lang, "multi_too_many", limit=free.max_files)
+            )
+        if reason:
+            await safe_edit(
+                progress,
+                failover_text(lang, user, "retry_free", filename=display_name),
+            )
+        result = await _do(api_key=None, expire=None, active_limits=free)
+        result["_used_key"] = False
+        result["_failover"] = bool(reason)
+        result["_failover_reason"] = reason
+        return result
+
+    if prefer_free or not api_key:
+        return await _upload_free(reason="auth" if prefer_free else None)
+    try:
+        result = await _do(
+            api_key=api_key,
+            expire=expire_seconds,
+            active_limits=limits,
+        )
+        result["_used_key"] = True
+        result["_failover"] = False
+        return result
+    except dripfiles_mod.DripFilesAuthError:
+        return await _upload_free(reason="auth")
+
+
 def drip_message_for(filename: str, size: int, count: int = 1) -> str:
     template = cfg.dripfiles_message or "{filename}"
     try:
@@ -825,6 +1323,7 @@ async def show_success(
     expires_at: int | float | None = None,
     tier: str = "free",
     failover: bool = False,
+    dev_download: bool = True,
 ) -> None:
     lang = normalize_lang(user.lang)
     url = (url or "").replace("`", "").replace("\n", "").replace("\r", "")
@@ -867,7 +1366,7 @@ async def show_success(
         link_preview_options=_NO_PREVIEW,
         reply_markup=success_keyboard(lang, url, token),
     )
-    if user.dev_mode:
+    if user.dev_mode and dev_download:
         tool = user.dev_tool if user.dev_tool in ("wget", "curl") else "wget"
         cmd = dripfiles_mod.download_command(tool, url, filename)
         # Entidad PRE (no markdown ```): evita línea vacía + etiqueta "shell"
@@ -954,6 +1453,7 @@ async def prompt_lang(
 
 def stash_pending_media(message: Message) -> None:
     if message.from_user and media_file_id(message):
+        pending_first_link.pop(message.from_user.id, None)
         pending_first_file[message.from_user.id] = message
 
 
@@ -1218,6 +1718,15 @@ async def cmd_zip(_: Client, message: Message):
     await start_zip_session(message)
 
 
+@app.on_message(filters.command("multi") & filters.private & auth)
+async def cmd_multi(_: Client, message: Message):
+    if message_is_stale(message):
+        return
+    if not await ensure_lang(message):
+        return
+    await start_zip_session(message, mode="multi")
+
+
 @app.on_message(filters.command("cancel") & filters.private & auth)
 async def cmd_cancel(_: Client, message: Message):
     if message_is_stale(message):
@@ -1230,8 +1739,11 @@ async def cmd_cancel(_: Client, message: Message):
     if user_id not in zip_sessions:
         await message.reply_text(t(lang, "zip_none"))
         return
+    mode = zip_sessions[user_id].mode
     await clear_zip_session(user_id)
-    await message.reply_text(t(lang, "zip_cancelled"))
+    await message.reply_text(
+        t(lang, "multi_cancelled" if mode == "multi" else "zip_cancelled")
+    )
 
 
 @app.on_message(filters.command("done") & filters.private & auth)
@@ -1277,6 +1789,11 @@ async def lang_callback(_: Client, query: CallbackQuery):
     pending = pending_first_file.pop(user_id, None)
     if pending:
         spawn(handle_single_file(pending))
+        return
+    pending_link = pending_first_link.pop(user_id, None)
+    if pending_link:
+        pending_message, url = pending_link
+        spawn(handle_dripfiles_link(pending_message, url))
 
 
 @app.on_callback_query(
@@ -1360,12 +1877,12 @@ async def dev_callback(_: Client, query: CallbackQuery):
         await query.message.reply_text(text)
 
 
-@app.on_callback_query(filters.regex(r"^zip:(done|cancel|start)$") & auth)
+@app.on_callback_query(filters.regex(r"^(zip|multi):(done|cancel|start)$") & auth)
 async def zip_callback(_: Client, query: CallbackQuery):
     user_id = query.from_user.id
     user = await database.get_user(user_id)
     lang = normalize_lang(user.lang)
-    action = query.data.split(":", 1)[1]
+    mode, action = query.data.split(":", 1)
     session = zip_sessions.get(user_id)
 
     if action == "start":
@@ -1376,7 +1893,15 @@ async def zip_callback(_: Client, query: CallbackQuery):
                 reply_markup=lang_keyboard(),
             )
             return
-        await start_zip_session(query.message, reply_to_user_id=user_id)
+        await start_zip_session(
+            query.message,
+            reply_to_user_id=user_id,
+            mode=mode,
+        )
+        return
+
+    if session and session.mode != mode:
+        await query.answer(t(lang, "session_button_old"), show_alert=True)
         return
 
     if action == "cancel":
@@ -1384,7 +1909,12 @@ async def zip_callback(_: Client, query: CallbackQuery):
             await clear_zip_session(user_id)
             await query.answer("OK")
             try:
-                await query.message.edit_text(t(lang, "zip_cancelled"))
+                await query.message.edit_text(
+                    t(
+                        lang,
+                        "multi_cancelled" if mode == "multi" else "zip_cancelled",
+                    )
+                )
             except Exception:
                 pass
         else:
@@ -1396,8 +1926,17 @@ async def zip_callback(_: Client, query: CallbackQuery):
             await clear_zip_session(user_id)
         await query.answer(t(lang, "zip_none_done"), show_alert=True)
         return
-    await query.answer(t(lang, "packing_answer"))
-    spawn(finish_zip(query.message, session, custom_name=None, from_callback=True))
+    if session.pending:
+        await query.answer(
+            t(lang, "session_pending", n=session.pending), show_alert=True
+        )
+        return
+    await query.answer(
+        t(lang, "multi_submit_answer" if mode == "multi" else "packing_answer")
+    )
+    spawn(
+        finish_zip(query.message, session, custom_name=None, from_callback=True)
+    )
 
 
 @app.on_callback_query(filters.regex(r"^reup:[a-f0-9]{12}$") & auth)
@@ -1415,6 +1954,77 @@ async def reup_callback(_: Client, query: CallbackQuery):
     spawn(do_reupload(query.message, job))
 
 
+@app.on_callback_query(
+    filters.regex(r"^df:(?:[tp]:[a-f0-9]{10}:\d+|[ans]:[a-f0-9]{10})$")
+    & auth
+)
+async def drip_selection_callback(_: Client, query: CallbackQuery):
+    parts = query.data.split(":")
+    action, token = parts[1], parts[2]
+    session = drip_selections.get(token)
+    lang = await lang_of(query.from_user.id)
+    if not session or session.expired():
+        if session:
+            drip_selections.pop(token, None)
+        await query.answer(t(lang, "drip_selection_expired"), show_alert=True)
+        return
+    if session.user_id != query.from_user.id:
+        await query.answer(t(lang, "reup_not_yours"), show_alert=True)
+        return
+
+    if action == "s":
+        async with session.lock:
+            if session.busy:
+                await query.answer(t(lang, "drip_already_sending"), show_alert=True)
+                return
+            if not session.selected:
+                await query.answer(t(lang, "drip_select_one"), show_alert=True)
+                return
+            session.busy = True
+            chosen = [session.files[i] for i in sorted(session.selected)]
+            drip_selections.pop(token, None)
+        await query.answer(t(lang, "drip_submit_answer"))
+        await safe_edit(
+            query.message,
+            t(lang, "drip_preparing_selected", n=len(chosen)),
+            reply_markup=None,
+        )
+        spawn(
+            deliver_public_files(
+                session.origin,
+                chosen,
+                source_url=session.source_url,
+                as_zip=False,
+                progress=query.message,
+            )
+        )
+        return
+
+    async with session.lock:
+        session.last_activity = time.monotonic()
+        if action == "t":
+            index = int(parts[3])
+            if index < 0 or index >= len(session.files):
+                await query.answer(t(lang, "drip_selection_expired"), show_alert=True)
+                return
+            if index in session.selected:
+                session.selected.remove(index)
+            else:
+                session.selected.add(index)
+        elif action == "p":
+            session.page = max(0, int(parts[3]))
+        elif action == "a":
+            session.selected = set(range(len(session.files)))
+        elif action == "n":
+            session.selected.clear()
+    await query.answer()
+    await safe_edit(
+        query.message,
+        drip_selection_text(session, lang),
+        reply_markup=drip_selection_keyboard(session, lang),
+    )
+
+
 @app.on_message(filters.private & auth & has_media)
 async def handle_media(_: Client, message: Message):
     user = await ensure_lang(message)
@@ -1430,7 +2040,12 @@ async def handle_media(_: Client, message: Message):
             if not message_is_stale(message):
                 await message.reply_text(t(lang, "zip_expired"))
             return
-        spawn(stage_for_zip(message, session))
+        async with session.lock:
+            if not zip_session_active(session):
+                return
+            session.pending += 1
+            session.touch()
+        spawn(stage_for_zip(message, session, reserved=True))
         return
 
     spawn(handle_single_file(message))
@@ -1447,8 +2062,12 @@ async def fallback_text(_: Client, message: Message):
         cmd = text[1:].split()[0].split("@", 1)[0].lower()
         if cmd in _KNOWN_CMDS:
             return
+    drip_url = extract_dripfiles_url(text)
     user = await ensure_lang(message)
     if not user:
+        if drip_url and message.from_user:
+            pending_first_file.pop(message.from_user.id, None)
+            pending_first_link[message.from_user.id] = (message, drip_url)
         return
     lang = normalize_lang(user.lang)
     if text.startswith("/"):
@@ -1456,6 +2075,9 @@ async def fallback_text(_: Client, message: Message):
             t(lang, "unknown_cmd"),
             reply_markup=help_keyboard(lang),
         )
+        return
+    if drip_url:
+        spawn(handle_dripfiles_link(message, drip_url))
         return
     if _URL_RE.match(text):
         await message.reply_text(t(lang, "hint_url"))
@@ -1467,9 +2089,82 @@ async def fallback_text(_: Client, message: Message):
     )
 
 
+async def handle_dripfiles_link(message: Message, url: str) -> None:
+    user_id = message.from_user.id
+    lang = await lang_of(user_id)
+    progress = await message.reply_text(t(lang, "drip_inspecting"))
+    try:
+        source_url, files = await dripfiles_mod.inspect_public_link(http, url)
+        if len(files) == 1:
+            await safe_edit(
+                progress,
+                t(lang, "drip_found_one", filename=safe_filename(files[0].name)),
+            )
+            spawn(
+                deliver_public_files(
+                    message,
+                    files,
+                    source_url=source_url,
+                    as_zip=False,
+                    progress=progress,
+                )
+            )
+            return
+
+        if len(files) > cfg.dripfiles_auto_zip_files:
+            await safe_edit(
+                progress,
+                t(
+                    lang,
+                    "drip_auto_zip",
+                    count=len(files),
+                    threshold=cfg.dripfiles_auto_zip_files,
+                ),
+            )
+            spawn(
+                deliver_public_files(
+                    message,
+                    files,
+                    source_url=source_url,
+                    as_zip=True,
+                    progress=progress,
+                )
+            )
+            return
+
+        # Una sola selección activa por usuario: el enlace nuevo sustituye al viejo.
+        for old_token, old in list(drip_selections.items()):
+            if old.user_id == user_id:
+                drip_selections.pop(old_token, None)
+        token = uuid.uuid4().hex[:10]
+        session = DripSelection(
+            token=token,
+            user_id=user_id,
+            source_url=source_url,
+            files=files,
+            origin=message,
+            prompt=progress,
+        )
+        drip_selections[token] = session
+        await safe_edit(
+            progress,
+            drip_selection_text(session, lang),
+            reply_markup=drip_selection_keyboard(session, lang),
+        )
+    except dripfiles_mod.DripFilesError as exc:
+        await safe_edit(progress, t(lang, "err_drip_download", err=exc))
+    except Exception as exc:
+        log.exception("Error inspeccionando enlace DripFiles")
+        await safe_edit(progress, t(lang, "err_drip_download", err=exc))
+
+
 async def start_zip_session(
-    message: Message, *, reply_to_user_id: int | None = None
+    message: Message,
+    *,
+    reply_to_user_id: int | None = None,
+    mode: str = "zip",
 ) -> None:
+    mode = "multi" if mode == "multi" else "zip"
     user_id = reply_to_user_id or message.from_user.id
     user = await database.get_user(user_id)
     lang = normalize_lang(user.lang)
@@ -1478,18 +2173,18 @@ async def start_zip_session(
         await message.reply_text(
             t(
                 lang,
-                "zip_already",
+                "multi_already" if existing.mode == "multi" else "zip_already",
                 n=len(existing.files),
                 size=human_size(existing.total_size),
             ),
-            reply_markup=zip_keyboard(lang),
+            reply_markup=zip_keyboard(lang, existing.mode),
         )
         return
     if existing:
         await clear_zip_session(user_id)
 
-    work = user_work_dir(user_id, "zip")
-    session = ZipSession(user_id=user_id, work_dir=work)
+    work = user_work_dir(user_id, mode)
+    session = ZipSession(user_id=user_id, work_dir=work, mode=mode)
     try:
         limits, _, _ = await user_limits(user)
         lim = human_size(limits.max_size_bytes)
@@ -1499,29 +2194,40 @@ async def start_zip_session(
     status = await message.reply_text(
         t(
             lang,
-            "zip_active",
+            "multi_active" if mode == "multi" else "zip_active",
             limit=lim,
             timeout=cfg.zip_timeout_minutes,
             n=0,
             size="0 B",
         ),
-        reply_markup=zip_keyboard(lang),
+        reply_markup=zip_keyboard(lang, mode),
     )
     session.status_msg = status
     zip_sessions[user_id] = session
 
 
-async def stage_for_zip(message: Message, session: ZipSession) -> None:
+async def stage_for_zip(
+    message: Message, session: ZipSession, *, reserved: bool = False
+) -> None:
     user = await database.get_user(session.user_id)
     lang = normalize_lang(user.lang)
-    if not zip_session_active(session):
-        return
-    if not await acquire_transfer(session.user_id):
-        await message.reply_text(t(lang, "err_busy"))
-        return
-
+    acquired = False
     progress: Message | None = None
     try:
+        if not reserved:
+            async with session.lock:
+                if not zip_session_active(session):
+                    return
+                session.pending += 1
+                session.touch()
+                reserved = True
+        elif not zip_session_active(session):
+            return
+        await refresh_zip_status(session, lang)
+        if not await acquire_transfer(session.user_id):
+            await message.reply_text(t(lang, "err_busy"))
+            return
+        acquired = True
         session.touch()
         try:
             limits, _, _ = await user_limits(user)
@@ -1555,7 +2261,13 @@ async def stage_for_zip(message: Message, session: ZipSession) -> None:
             )
             return
 
-        progress = await message.reply_text(t(lang, "zip_add", name=name))
+        progress = await message.reply_text(
+            t(
+                lang,
+                "multi_add" if session.mode == "multi" else "zip_add",
+                name=name,
+            )
+        )
         staged = await download_telegram_media(
             message,
             session.work_dir,
@@ -1567,6 +2279,7 @@ async def stage_for_zip(message: Message, session: ZipSession) -> None:
         n = 0
         total = 0
         over_after = False
+        too_many_after = False
         async with session.lock:
             if not zip_session_active(session):
                 try:
@@ -1577,6 +2290,9 @@ async def stage_for_zip(message: Message, session: ZipSession) -> None:
             if session.total_size + staged.size > limits.max_size_bytes:
                 os.remove(staged.path)
                 over_after = True
+            elif session.mode == "multi" and len(session.files) >= limits.max_files:
+                os.remove(staged.path)
+                too_many_after = True
             else:
                 session.files.append(staged)
                 session.touch()
@@ -1593,12 +2309,18 @@ async def stage_for_zip(message: Message, session: ZipSession) -> None:
                 ),
             )
             return
+        if too_many_after:
+            await safe_edit(
+                progress,
+                t(lang, "multi_too_many", limit=limits.max_files),
+            )
+            return
 
         await safe_edit(
             progress,
             t(
                 lang,
-                "zip_added",
+                "multi_added" if session.mode == "multi" else "zip_added",
                 n=n,
                 name=staged.filename,
                 size=human_size(staged.size),
@@ -1612,32 +2334,47 @@ async def stage_for_zip(message: Message, session: ZipSession) -> None:
         else:
             await message.reply_text(t(lang, "err_drip", err=exc))
     except Exception as exc:
-        log.exception("Error añadiendo archivo al zip")
+        log.exception("Error añadiendo archivo a sesión %s", session.mode)
         if progress:
             await safe_edit(progress, t(lang, "err_download", err=exc))
         else:
             await message.reply_text(t(lang, "err_download", err=exc))
     finally:
-        await release_transfer(session.user_id)
+        if reserved:
+            async with session.lock:
+                session.pending = max(0, session.pending - 1)
+                session.touch()
+            await refresh_zip_status(session, lang)
+        if acquired:
+            await release_transfer(session.user_id)
 
 
 async def refresh_zip_status(session: ZipSession, lang: str) -> None:
-    if not session.status_msg:
+    if not session.status_msg or not zip_session_active(session):
         return
     n = len(session.files)
+    title = "🔗 **MULTI**" if session.mode == "multi" else "📦 **ZIP**"
+    pending = (
+        f" · ⏳ {session.pending}" if session.pending else ""
+    )
     body = [
-        f"📦 **ZIP** · **{n}** · {human_size(session.total_size)}",
+        f"{title} · **{n}** · {human_size(session.total_size)}{pending}",
         "",
     ]
     for i, f in enumerate(session.files[-12:], start=max(1, n - 11)):
         body.append(f"{i}. `{f.filename}` ({human_size(f.size)})")
     if n > 12:
         body.append(f"… {n - 12}")
-    body.append(t(lang, "zip_status_footer").strip())
+    body.append(
+        t(
+            lang,
+            "multi_status_footer" if session.mode == "multi" else "zip_status_footer",
+        ).strip()
+    )
     await safe_edit(
         session.status_msg,
         "\n".join(body),
-        reply_markup=zip_keyboard(lang),
+        reply_markup=zip_keyboard(lang, session.mode),
     )
 
 
@@ -1657,8 +2394,15 @@ async def finish_zip(
             if not from_callback:
                 await message.reply_text(t(lang, "zip_busy"))
             return
+        if session.pending:
+            await message.reply_text(
+                t(lang, "session_pending", n=session.pending)
+            )
+            return
         if not session.files:
-            await message.reply_text(t(lang, "zip_empty"))
+            await message.reply_text(
+                t(lang, "multi_empty" if session.mode == "multi" else "zip_empty")
+            )
             return
 
     if not await acquire_transfer(user_id):
@@ -1669,13 +2413,16 @@ async def finish_zip(
         if (
             session.busy
             or session.closed
+            or session.pending
             or zip_sessions.get(user_id) is not session
         ):
             await release_transfer(user_id)
             return
         if not session.files:
             await release_transfer(user_id)
-            await message.reply_text(t(lang, "zip_empty"))
+            await message.reply_text(
+                t(lang, "multi_empty" if session.mode == "multi" else "zip_empty")
+            )
             return
         session.busy = True
         session.closed = True
@@ -1691,9 +2438,78 @@ async def finish_zip(
 
     progress: Message | None = None
     try:
-        progress = await message.reply_text(t(lang, "zip_packing", n=len(files)))
+        progress = await message.reply_text(
+            t(
+                lang,
+                "multi_uploading_prep" if session.mode == "multi" else "zip_packing",
+                n=len(files),
+            )
+        )
         limits, expire, failover = await user_limits(user)
         prefer_free = failover == "auth"
+
+        if session.mode == "multi":
+            if len(files) > limits.max_files:
+                raise dripfiles_mod.DripFilesError(
+                    t(lang, "multi_too_many", limit=limits.max_files)
+                )
+            total_size = sum(f.size for f in files)
+            if total_size > limits.max_size_bytes:
+                raise dripfiles_mod.DripFilesError(
+                    t(
+                        lang,
+                        "file_too_big_result",
+                        size=human_size(total_size),
+                        limit=human_size(limits.max_size_bytes),
+                    )
+                )
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            display_name = (
+                safe_filename(custom_name, f"drip_multi_{stamp}")
+                if custom_name
+                else f"drip_multi_{stamp}"
+            )
+            result = await upload_many_to_dripfiles(
+                files,
+                display_name,
+                progress,
+                user=user,
+                limits=limits,
+                expire_seconds=expire,
+                lang=lang,
+                prefer_free=prefer_free,
+            )
+            token = await register_job(
+                user_id,
+                kind="multi",
+                output_name=display_name,
+                files=refs,
+            )
+            used_tier = (
+                "free" if result.get("_failover") or prefer_free else limits.tier
+            )
+            await show_success(
+                progress,
+                url=result["url"],
+                filename=display_name,
+                size=total_size,
+                count=len(files),
+                token=token,
+                user=user,
+                expire_seconds=result.get("expire")
+                or (None if result.get("_failover") or prefer_free else expire),
+                expires_at=result.get("expires_at"),
+                tier=used_tier,
+                failover=bool(result.get("_failover") or prefer_free),
+                dev_download=False,
+            )
+            if session.status_msg:
+                await safe_edit(
+                    session.status_msg,
+                    t(lang, "multi_closed", n=len(files)),
+                    reply_markup=None,
+                )
+            return
 
         if custom_name:
             zip_name = safe_filename(custom_name)
@@ -1774,7 +2590,7 @@ async def finish_zip(
         else:
             await message.reply_text(t(lang, "err_drip", err=exc))
     except Exception as exc:
-        log.exception("Error finalizando zip")
+        log.exception("Error finalizando sesión %s", session.mode)
         if progress:
             await safe_edit(progress, t(lang, "err_generic", err=exc))
         else:
@@ -1927,6 +2743,42 @@ async def do_reupload(origin: Message, job: PendingJob) -> None:
             staged.filename = safe_filename(ref.filename) or staged.filename
             staged_files.append(staged)
 
+        if job.kind == "multi":
+            total_size = sum(f.size for f in staged_files)
+            if len(staged_files) > limits.max_files:
+                raise dripfiles_mod.DripFilesError(
+                    t(lang, "multi_too_many", limit=limits.max_files)
+                )
+            result = await upload_many_to_dripfiles(
+                staged_files,
+                job.output_name,
+                progress,
+                user=user,
+                limits=limits,
+                expire_seconds=expire,
+                lang=lang,
+                prefer_free=prefer_free,
+            )
+            used_tier = (
+                "free" if result.get("_failover") or prefer_free else limits.tier
+            )
+            await show_success(
+                progress,
+                url=result["url"],
+                filename=job.output_name,
+                size=total_size,
+                count=len(staged_files),
+                token=job.token,
+                user=user,
+                expire_seconds=result.get("expire")
+                or (None if result.get("_failover") or prefer_free else expire),
+                expires_at=result.get("expires_at"),
+                tier=used_tier,
+                failover=bool(result.get("_failover") or prefer_free),
+                dev_download=False,
+            )
+            return
+
         if job.kind == "zip" or len(staged_files) > 1:
             zip_name = safe_filename(job.output_name)
             if not zip_name.lower().endswith(".zip"):
@@ -2014,7 +2866,7 @@ async def zip_janitor() -> None:
         expired = [
             (uid, s)
             for uid, s in list(zip_sessions.items())
-            if s.expired() and not s.busy and not s.closed
+            if s.expired() and not s.busy and not s.closed and not s.pending
         ]
         for uid, session in expired:
             lang = await lang_of(uid)
@@ -2023,6 +2875,7 @@ async def zip_janitor() -> None:
                 current is not session
                 or session.busy
                 or session.closed
+                or session.pending
                 or not session.expired()
             ):
                 continue
@@ -2036,7 +2889,20 @@ async def zip_janitor() -> None:
                     )
                 except Exception:
                     pass
-            log.info("Sesión ZIP expirada para user %s", uid)
+            log.info("Sesión %s expirada para user %s", session.mode, uid)
+        for token, selection in list(drip_selections.items()):
+            if selection.busy or not selection.expired():
+                continue
+            if drip_selections.get(token) is not selection:
+                continue
+            drip_selections.pop(token, None)
+            if selection.prompt:
+                lang = await lang_of(selection.user_id)
+                await safe_edit(
+                    selection.prompt,
+                    t(lang, "drip_selection_expired"),
+                    reply_markup=None,
+                )
         try:
             await database.prune_jobs()
         except Exception:
@@ -2085,9 +2951,10 @@ async def main() -> None:
         BotCommand("start", "Help / Ayuda"),
         BotCommand("help", "Help / Ayuda"),
         BotCommand("lang", "Language / Idioma"),
+        BotCommand("multi", "Several files in one link"),
         BotCommand("zip", "ZIP mode"),
-        BotCommand("done", "Finish ZIP"),
-        BotCommand("cancel", "Cancel ZIP"),
+        BotCommand("done", "Finish multi-file / ZIP"),
+        BotCommand("cancel", "Cancel multi-file / ZIP"),
     ]
     if cfg.allow_user_api_keys:
         commands.append(BotCommand("apikey", "DripFiles API key"))

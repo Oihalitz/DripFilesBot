@@ -47,24 +47,27 @@ STRINGS: dict[str, dict[str, str]] = {
         "es": (
             "💧 **DripFilesBot**\n\n"
             "Mándame un **archivo** y te devuelvo un enlace para compartir.\n"
+            "O mándame un **enlace de DripFiles** y te entrego sus archivos.\n"
             "Hasta **~4 GB** con Telegram Premium.\n\n"
-            "Varios archivos: pulsa **📦 ZIP** (o `/zip`) y luego **✅ Listo**.\n"
+            "Un enlace con varios archivos: `/multi`. Comprimidos: `/zip`.\n"
             "Si el enlace caduca, **🔄 Resubir**.\n"
             "{api_note}"
         ),
         "en": (
             "💧 **DripFilesBot**\n\n"
             "Send me a **file** and I'll give you a shareable link.\n"
+            "Or send a **DripFiles link** and I'll deliver its files.\n"
             "Up to **~4 GB** with Telegram Premium.\n\n"
-            "Several files: tap **📦 ZIP** (or `/zip`), then **✅ Done**.\n"
+            "One link with several files: `/multi`. Compressed: `/zip`.\n"
             "If the link expires, tap **🔄 Re-upload**.\n"
             "{api_note}"
         ),
         "pt": (
             "💧 **DripFilesBot**\n\n"
             "Envie um **arquivo** e eu devolvo um link para compartilhar.\n"
+            "Ou envie um **link do DripFiles** e eu entrego os arquivos.\n"
             "Até **~4 GB** com Telegram Premium.\n\n"
-            "Vários arquivos: toque em **📦 ZIP** (ou `/zip`) e depois **✅ Pronto**.\n"
+            "Um link com vários arquivos: `/multi`. Compactados: `/zip`.\n"
             "Se o link expirar, **🔄 Reenviar**.\n"
             "{api_note}"
         ),
@@ -89,23 +92,135 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
     },
     "hint_send_file": {
-        "es": "Mándame un **archivo** y te doy el enlace. Varios: **📦 ZIP**.",
-        "en": "Send me a **file** and I'll give you the link. Several files: **📦 ZIP**.",
-        "pt": "Envie um **arquivo** e eu te dou o link. Vários: **📦 ZIP**.",
+        "es": "Mándame un **archivo** o un **enlace de DripFiles**. Varios: **📦 ZIP**.",
+        "en": "Send me a **file** or a **DripFiles link**. Several files: **📦 ZIP**.",
+        "pt": "Envie um **arquivo** ou um **link do DripFiles**. Vários: **📦 ZIP**.",
     },
     "hint_url": {
+        "es": "Solo puedo descargar **enlaces públicos de DripFiles**.",
+        "en": "I can only download **public DripFiles links**.",
+        "pt": "Só posso baixar **links públicos do DripFiles**.",
+    },
+    "drip_inspecting": {
+        "es": "🔎 Revisando el enlace de **DripFiles**…",
+        "en": "🔎 Checking the **DripFiles** link…",
+        "pt": "🔎 Verificando o link do **DripFiles**…",
+    },
+    "drip_found_one": {
+        "es": "⬇️ Archivo encontrado: `{filename}`",
+        "en": "⬇️ File found: `{filename}`",
+        "pt": "⬇️ Arquivo encontrado: `{filename}`",
+    },
+    "drip_pick": {
         "es": (
-            "Eso es un enlace. Yo no lo descargo: mándame el **archivo** "
-            "y te devuelvo un link de DripFiles."
+            "📂 El enlace contiene **{count} archivos**.\n\n"
+            "Marca exactamente los que quieres y pulsa **Enviar**.\n"
+            "Seleccionados: **{selected}**"
         ),
         "en": (
-            "That's a link. I don't download those — send me the **file** "
-            "and I'll give you a DripFiles URL."
+            "📂 This link contains **{count} files**.\n\n"
+            "Select exactly what you want and tap **Submit**.\n"
+            "Selected: **{selected}**"
         ),
         "pt": (
-            "Isso é um link. Eu não baixo links: envie o **arquivo** "
-            "e eu devolvo um URL do DripFiles."
+            "📂 Este link contém **{count} arquivos**.\n\n"
+            "Marque exatamente o que deseja e toque em **Enviar**.\n"
+            "Selecionados: **{selected}**"
         ),
+    },
+    "btn_select_all": {
+        "es": "Todos",
+        "en": "All",
+        "pt": "Todos",
+    },
+    "btn_select_none": {
+        "es": "Ninguno",
+        "en": "None",
+        "pt": "Nenhum",
+    },
+    "btn_submit_files": {
+        "es": "📤 Enviar ({n})",
+        "en": "📤 Submit ({n})",
+        "pt": "📤 Enviar ({n})",
+    },
+    "drip_auto_zip": {
+        "es": (
+            "📦 El enlace tiene **{count} archivos** (más de {threshold}); "
+            "te los enviaré directamente en un ZIP."
+        ),
+        "en": (
+            "📦 This link has **{count} files** (more than {threshold}); "
+            "I'll send them directly as a ZIP."
+        ),
+        "pt": (
+            "📦 Este link tem **{count} arquivos** (mais de {threshold}); "
+            "vou enviá-los diretamente em um ZIP."
+        ),
+    },
+    "drip_preparing": {
+        "es": "⏳ Preparando la descarga de DripFiles…",
+        "en": "⏳ Preparing the DripFiles download…",
+        "pt": "⏳ Preparando o download do DripFiles…",
+    },
+    "drip_preparing_selected": {
+        "es": "⏳ Preparando **{n}** archivo(s) seleccionado(s)…",
+        "en": "⏳ Preparing **{n}** selected file(s)…",
+        "pt": "⏳ Preparando **{n}** arquivo(s) selecionado(s)…",
+    },
+    "drip_downloading": {
+        "es": "⬇️ DripFiles ({i}/{n}) · `{filename}`",
+        "en": "⬇️ DripFiles ({i}/{n}) · `{filename}`",
+        "pt": "⬇️ DripFiles ({i}/{n}) · `{filename}`",
+    },
+    "drip_packing": {
+        "es": "📦 Empaquetando **{n}** archivos en ZIP…",
+        "en": "📦 Packing **{n}** files into a ZIP…",
+        "pt": "📦 Empacotando **{n}** arquivos em ZIP…",
+    },
+    "drip_sending": {
+        "es": "📤 Enviando a Telegram · `{filename}`",
+        "en": "📤 Sending to Telegram · `{filename}`",
+        "pt": "📤 Enviando ao Telegram · `{filename}`",
+    },
+    "drip_sent": {
+        "es": "✅ Envío completado · **{n}** archivo(s).",
+        "en": "✅ Delivery complete · **{n}** file(s).",
+        "pt": "✅ Envio concluído · **{n}** arquivo(s).",
+    },
+    "drip_link_expired": {
+        "es": "el enlace o el archivo ya no está disponible",
+        "en": "the link or file is no longer available",
+        "pt": "o link ou arquivo não está mais disponível",
+    },
+    "drip_total_too_big": {
+        "es": "el conjunto pesa {size} y supera el límite de Telegram ({limit})",
+        "en": "the files total {size}, over Telegram's limit ({limit})",
+        "pt": "o conjunto tem {size} e supera o limite do Telegram ({limit})",
+    },
+    "drip_selection_expired": {
+        "es": "Esta selección ha caducado. Envía el enlace otra vez.",
+        "en": "This selection expired. Send the link again.",
+        "pt": "Esta seleção expirou. Envie o link novamente.",
+    },
+    "drip_already_sending": {
+        "es": "Ya estoy enviando esta selección.",
+        "en": "I'm already sending this selection.",
+        "pt": "Já estou enviando esta seleção.",
+    },
+    "drip_select_one": {
+        "es": "Selecciona al menos un archivo.",
+        "en": "Select at least one file.",
+        "pt": "Selecione pelo menos um arquivo.",
+    },
+    "drip_submit_answer": {
+        "es": "Descargando selección…",
+        "en": "Downloading selection…",
+        "pt": "Baixando seleção…",
+    },
+    "err_drip_download": {
+        "es": "❌ No pude descargar el enlace de DripFiles: {err}",
+        "en": "❌ Could not download the DripFiles link: {err}",
+        "pt": "❌ Não consegui baixar o link do DripFiles: {err}",
     },
     "unknown_cmd": {
         "es": "No conozco ese comando. Mándame un archivo, o pulsa **Ajustes** / `/help`.",
@@ -126,6 +241,11 @@ STRINGS: dict[str, dict[str, str]] = {
         "es": "📦 Empezar modo ZIP",
         "en": "📦 Start ZIP mode",
         "pt": "📦 Iniciar modo ZIP",
+    },
+    "btn_multi_start": {
+        "es": "🔗 Varios sin ZIP",
+        "en": "🔗 Multi-file link",
+        "pt": "🔗 Vários sem ZIP",
     },
     "btn_settings": {
         "es": "⚙️ Ajustes",
@@ -161,6 +281,11 @@ STRINGS: dict[str, dict[str, str]] = {
         "es": "✅ Listo",
         "en": "✅ Done",
         "pt": "✅ Pronto",
+    },
+    "btn_multi_done": {
+        "es": "🔗 Crear enlace",
+        "en": "🔗 Create link",
+        "pt": "🔗 Criar link",
     },
     "btn_zip_cancel": {
         "es": "❌ Cancelar",
@@ -219,9 +344,9 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
     },
     "count_line": {
-        "es": "📦 Archivos en el zip: **{count}**\n",
-        "en": "📦 Files in zip: **{count}**\n",
-        "pt": "📦 Arquivos no zip: **{count}**\n",
+        "es": "📦 Archivos: **{count}**\n",
+        "en": "📦 Files: **{count}**\n",
+        "pt": "📦 Arquivos: **{count}**\n",
     },
     "tier_note": {
         "es": "· plan **{tier}**",
@@ -365,6 +490,97 @@ STRINGS: dict[str, dict[str, str]] = {
         "en": "💧 Uploading to **DripFiles** · `{filename}`\nPreparing...",
         "pt": "💧 Enviando ao **DripFiles** · `{filename}`\nPreparando...",
     },
+    "multi_active": {
+        "es": (
+            "🔗 **Modo MULTI activo**\n\n"
+            "Mándame todos los archivos. Crearé **un solo enlace de DripFiles** "
+            "manteniéndolos separados, sin ZIP.\n"
+            "Cuando acabes: **🔗 Crear enlace** o `/done`\n"
+            "Límite total: **{limit}** · timeout {timeout} min.\n\n"
+            "_{n} archivos · {size}_"
+        ),
+        "en": (
+            "🔗 **MULTI mode active**\n\n"
+            "Send every file. I'll create **one DripFiles link** while keeping "
+            "them separate, without a ZIP.\n"
+            "When done: **🔗 Create link** or `/done`\n"
+            "Total limit: **{limit}** · timeout {timeout} min.\n\n"
+            "_{n} files · {size}_"
+        ),
+        "pt": (
+            "🔗 **Modo MULTI ativo**\n\n"
+            "Envie todos os arquivos. Vou criar **um único link do DripFiles** "
+            "mantendo-os separados, sem ZIP.\n"
+            "Ao terminar: **🔗 Criar link** ou `/done`\n"
+            "Limite total: **{limit}** · timeout {timeout} min.\n\n"
+            "_{n} arquivos · {size}_"
+        ),
+    },
+    "multi_status_footer": {
+        "es": "\n\nManda más archivos, **🔗 Crear enlace** o `/done` · `/cancel` para abortar.",
+        "en": "\n\nSend more files, **🔗 Create link** or `/done` · `/cancel` to abort.",
+        "pt": "\n\nEnvie mais arquivos, **🔗 Criar link** ou `/done` · `/cancel` para abortar.",
+    },
+    "multi_already": {
+        "es": "🔗 Ya tienes un modo MULTI activo con **{n}** archivo(s) ({size}).",
+        "en": "🔗 You already have an active MULTI session with **{n}** file(s) ({size}).",
+        "pt": "🔗 Você já tem uma sessão MULTI ativa com **{n}** arquivo(s) ({size}).",
+    },
+    "multi_cancelled": {
+        "es": "❌ Sesión MULTI cancelada. Archivos temporales borrados.",
+        "en": "❌ MULTI session cancelled. Temp files deleted.",
+        "pt": "❌ Sessão MULTI cancelada. Arquivos temporários apagados.",
+    },
+    "multi_empty": {
+        "es": "No hay archivos en la sesión MULTI. Manda alguno o usa /cancel.",
+        "en": "No files in the MULTI session. Send one or use /cancel.",
+        "pt": "Não há arquivos na sessão MULTI. Envie um ou use /cancel.",
+    },
+    "multi_add": {
+        "es": "⬇️ Añadiendo al enlace · `{name}`…",
+        "en": "⬇️ Adding to the link · `{name}`…",
+        "pt": "⬇️ Adicionando ao link · `{name}`…",
+    },
+    "multi_added": {
+        "es": "✅ **{n}.** `{name}` ({size})\nTotal: **{n}** archivo(s) · {total}",
+        "en": "✅ **{n}.** `{name}` ({size})\nTotal: **{n}** file(s) · {total}",
+        "pt": "✅ **{n}.** `{name}` ({size})\nTotal: **{n}** arquivo(s) · {total}",
+    },
+    "multi_too_many": {
+        "es": "La cuenta de DripFiles admite como máximo **{limit} archivos** por enlace.",
+        "en": "The DripFiles account allows at most **{limit} files** per link.",
+        "pt": "A conta do DripFiles permite no máximo **{limit} arquivos** por link.",
+    },
+    "multi_uploading_prep": {
+        "es": "💧 Preparando una subida de **{n} archivos** a DripFiles…",
+        "en": "💧 Preparing a **{n}-file** DripFiles upload…",
+        "pt": "💧 Preparando um envio de **{n} arquivos** ao DripFiles…",
+    },
+    "multi_uploading": {
+        "es": "💧 Subiendo **{n} archivos** a DripFiles",
+        "en": "💧 Uploading **{n} files** to DripFiles",
+        "pt": "💧 Enviando **{n} arquivos** ao DripFiles",
+    },
+    "multi_closed": {
+        "es": "✅ Sesión MULTI cerrada · **{n} archivos** en un enlace.",
+        "en": "✅ MULTI session closed · **{n} files** in one link.",
+        "pt": "✅ Sessão MULTI encerrada · **{n} arquivos** em um link.",
+    },
+    "multi_submit_answer": {
+        "es": "Creando enlace…",
+        "en": "Creating link…",
+        "pt": "Criando link…",
+    },
+    "session_pending": {
+        "es": "Aún estoy descargando **{n}** archivo(s). Espera a que terminen.",
+        "en": "I'm still downloading **{n}** file(s). Wait for them to finish.",
+        "pt": "Ainda estou baixando **{n}** arquivo(s). Aguarde terminar.",
+    },
+    "session_button_old": {
+        "es": "Ese botón pertenece a una sesión anterior.",
+        "en": "That button belongs to an older session.",
+        "pt": "Esse botão pertence a uma sessão anterior.",
+    },
     "zip_active": {
         "es": (
             "📦 **Modo ZIP activo**\n\n"
@@ -408,14 +624,14 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
     },
     "zip_none": {
-        "es": "No hay ninguna sesión /zip activa.",
-        "en": "No active /zip session.",
-        "pt": "Nenhuma sessão /zip ativa.",
+        "es": "No hay ninguna sesión `/zip` o `/multi` activa.",
+        "en": "No active `/zip` or `/multi` session.",
+        "pt": "Nenhuma sessão `/zip` ou `/multi` ativa.",
     },
     "zip_none_done": {
-        "es": "No hay sesión /zip activa. Usa `/zip` para empezar.",
-        "en": "No active /zip session. Use `/zip` to start.",
-        "pt": "Nenhuma sessão /zip ativa. Use `/zip` para começar.",
+        "es": "No hay sesión activa. Usa `/multi` o `/zip` para empezar.",
+        "en": "No active session. Use `/multi` or `/zip` to start.",
+        "pt": "Nenhuma sessão ativa. Use `/multi` ou `/zip` para começar.",
     },
     "zip_cancelled": {
         "es": "❌ Sesión ZIP cancelada. Archivos temporales borrados.",
@@ -423,14 +639,14 @@ STRINGS: dict[str, dict[str, str]] = {
         "pt": "❌ Sessão ZIP cancelada. Arquivos temporários apagados.",
     },
     "zip_expired": {
-        "es": "⏱ La sesión /zip expiró. Usa `/zip` de nuevo.",
-        "en": "⏱ ZIP session expired. Use `/zip` again.",
-        "pt": "⏱ Sessão /zip expirou. Use `/zip` de novo.",
+        "es": "⏱ La sesión expiró. Inicia `/multi` o `/zip` de nuevo.",
+        "en": "⏱ Session expired. Start `/multi` or `/zip` again.",
+        "pt": "⏱ A sessão expirou. Inicie `/multi` ou `/zip` novamente.",
     },
     "zip_expired_idle": {
-        "es": "⏱ Sesión ZIP expirada por inactividad ({m} min).",
-        "en": "⏱ ZIP session expired due to inactivity ({m} min).",
-        "pt": "⏱ Sessão ZIP expirada por inatividade ({m} min).",
+        "es": "⏱ Sesión expirada por inactividad ({m} min).",
+        "en": "⏱ Session expired due to inactivity ({m} min).",
+        "pt": "⏱ Sessão expirada por inatividade ({m} min).",
     },
     "zip_empty": {
         "es": "No hay archivos en el zip. Manda alguno o /cancel.",
@@ -438,9 +654,9 @@ STRINGS: dict[str, dict[str, str]] = {
         "pt": "Nenhum arquivo no zip. Envie algum ou /cancel.",
     },
     "zip_busy": {
-        "es": "⏳ Ya estoy empaquetando este zip…",
-        "en": "⏳ Already packing this zip…",
-        "pt": "⏳ Já estou empacotando este zip…",
+        "es": "⏳ Ya estoy finalizando esta sesión…",
+        "en": "⏳ Already finishing this session…",
+        "pt": "⏳ Já estou finalizando esta sessão…",
     },
     "zip_packing": {
         "es": "🗜️ Empaquetando **{n}** archivo(s)…",
